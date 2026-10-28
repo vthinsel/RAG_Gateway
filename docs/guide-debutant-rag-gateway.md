@@ -95,6 +95,7 @@ Les routes `/v1/*` demandent un bearer token. Avec `API_KEY_REGISTRY` vide, il d
 | --- | --- |
 | `GET /v1/models` | Annonce le nom de modèle exposé par la gateway, par défaut `rag-local`. |
 | `GET /v1/status` | Retourne l'état non sensible d'Atlas, de l'index, d'Ollama, de MongoDB AI API et de l'authentification. |
+| `GET /tools/playground` | Ouvre le playground web pour examiner les passages trouvés ou tester le chat RAG. |
 | `GET /v1` | Retourne l'état authentifié de la gateway et ses routes de compatibilité. |
 | `GET /v1/api/tags` | Retourne une liste de modèles compatible Ollama contenant le modèle de la gateway. |
 | `GET /v1/api/ps` | Retourne une réponse compatible Ollama avec une liste vide ; l'état mémoire du modèle backend n'est pas exposé. |
@@ -192,6 +193,12 @@ DOCUMENT_PARSER_MODEL=glm-ocr:latest
 ```
 
 Après redémarrage du service, ouvrez `http://127.0.0.1:8000/tools/document-loader` et saisissez `GATEWAY_API_KEY` ou une clé de tenant inscrite. Vous pouvez sélectionner ou glisser-déposer des fichiers et des dossiers depuis votre appareil ; les chemins relatifs des dossiers sont conservés comme identifiants de document. L'interface permet aussi de parcourir les répertoires du serveur autorisés par `DOCUMENT_LOADER_ROOTS`. Les envois sont limités à 500 fichiers, 50 MiB par fichier et 200 MiB par job. La page affiche le fichier courant et l'avancement ; l'historique des jobs reste en mémoire et disparaît au redémarrage. Une clé inscrite doit autoriser le tenant sélectionné ; la clé administrateur donne accès à tous les tenants. Le texte extrait doit respecter `MAX_DOCUMENT_CHARS`.
+
+### Tester les documents envoyés dans le playground
+
+Une fois l'ingestion terminée avec succès dans le chargeur de documents, ouvrez `http://127.0.0.1:8000/tools/playground`, indiquez le même tenant et un bearer token autorisé, puis choisissez **Retrieve sources only**. Posez une question sur le contenu envoyé pour afficher les chunks correspondants, leurs identifiants de document et leurs scores de recherche. Ce mode permet de tester l'extraction et la recherche sans connecter ni appeler un modèle LLM de chat ; aucune réponse générée n'est demandée.
+
+La recherche nécessite toutefois le service d'embedding configuré pour vectoriser la question ainsi que MongoDB Atlas avec un index Vector Search opérationnel pour retrouver les chunks ingérés. L'OCR des PDF et images peut aussi nécessiter le parseur Ollama configuré pendant l'ingestion. Le mode **Answer with RAG** appelle en plus le modèle de chat Ollama configuré. Un simple aperçu ne réalise pas l'ingestion : attendez la fin du job du chargeur avant de tester le document dans le playground.
 
 ## 5. Comment une question devient une réponse
 

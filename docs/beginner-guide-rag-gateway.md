@@ -95,6 +95,7 @@ The `/v1/*` routes require a bearer token. When `API_KEY_REGISTRY` is empty, the
 | --- | --- |
 | `GET /v1/models` | Advertises the model name exposed by the gateway, `rag-local` by default. |
 | `GET /v1/status` | Reports safe status for Atlas, vector index, Ollama, MongoDB AI API, and Gateway authentication. |
+| `GET /tools/playground` | Opens the browser playground to inspect retrieved passages or try RAG chat. |
 | `GET /v1` | Returns authenticated gateway status and compatibility route information. |
 | `GET /v1/api/tags` | Returns an Ollama-compatible list containing the gateway model for model discovery. |
 | `GET /v1/api/ps` | Returns an Ollama-compatible running-model response with an empty list; backend model residency is not exposed. |
@@ -192,6 +193,12 @@ DOCUMENT_PARSER_MODEL=glm-ocr:latest
 ```
 
 After restarting the service, open `http://127.0.0.1:8000/tools/document-loader` and enter `GATEWAY_API_KEY` or a registered tenant key. You can choose or drag-and-drop files and folders from your browser device; folder-relative paths are retained as document IDs. The page also supports scanning gateway-host directories under `DOCUMENT_LOADER_ROOTS`. Uploads are limited to 500 files, 50 MiB per file, and 200 MiB total per job. The page shows the current file and job counts; job history is in memory and lost on restart. A registered key must authorize the selected tenant; the administrator key has access to all tenants. Extracted text must fit within `MAX_DOCUMENT_CHARS`.
+
+### Experiment with uploaded documents in the playground
+
+After the document-loader job reports successful ingestion, open `http://127.0.0.1:8000/tools/playground`, enter the same tenant ID and an authorized bearer key, and select **Retrieve sources only**. Ask a question about the uploaded content to see the matching chunks, document IDs, and retrieval scores. This is a way to test document extraction and retrieval without connecting or calling a chat LLM; no generated answer is requested in this mode.
+
+Retrieval still needs the configured embedding service to vectorize the question and MongoDB Atlas with a ready vector-search index to search the ingested chunks. PDF/image OCR may also need the configured Ollama parser during ingestion. Chat mode (**Answer with RAG**) additionally calls the configured Ollama chat model. A document preview alone does not ingest it, so finish the loader job before testing it in the playground.
 
 ## 5. How a Question Becomes an Answer
 
