@@ -4,7 +4,7 @@ services:
     env_file:
       - .env
     environment:
-      OLLAMA_BASE_URL: http://ollama.example.invalid:30068/v1
+      OLLAMA_BASE_URL: "${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}"
     ports:
       - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000"
     extra_hosts:

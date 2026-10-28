@@ -44,11 +44,28 @@ For tenant-scoped API keys, set `API_KEY_REGISTRY` to a JSON object mapping each
 
 ## Prerequisites
 
-- Linux host with Miniconda or another Conda distribution, and Git.
+- Python 3.11 or newer, and Git. The included Conda environment uses Python 3.12.
 - A running Ollama service and a model already pulled (`ollama list`). Set `OLLAMA_MODEL` to the exact installed model tag.
 - A MongoDB Atlas cluster with Vector Search available, a database user, and a network rule for the gateway host.
 - A MongoDB AI Models API key.
 - Docker Engine and the Compose plugin only if using the optional container deployment.
+
+## Install from source
+
+Create and configure `.env` from `.env.example`, then install and run the gateway:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[loader]"
+cp .env.example .env
+python -m rag_gateway
+```
+
+Set `MONGODB_URI`, `MONGODB_API_KEY`, and `GATEWAY_API_KEY` (or configure
+`API_KEY_REGISTRY`) in `.env` before using the API. On Windows PowerShell, activate
+the environment with `.venv\Scripts\Activate.ps1`; the same install command applies.
+The Conda workflow below is an alternative.
 
 ## Linux Setup (Miniconda)
 
@@ -188,7 +205,7 @@ docker compose up --build -d
 docker compose logs -f rag-gateway
 ```
 
-Compose publishes the gateway on `127.0.0.1:8000` by default and points its container to Ollama at `host.docker.internal:11434` using Docker's `host-gateway` mapping. Compose sets `OLLAMA_BASE_URL` in the service environment, overriding any value for that variable in `.env`. Atlas Network Access must allow the host/container's public egress IP. If Open WebUI runs in a different container, add `host.docker.internal:host-gateway` to its `extra_hosts` and use `http://host.docker.internal:8000/v1`. If host-gateway routing is unavailable, place both containers on one Docker network and address the gateway by its Compose service name. The gateway container may need Ollama to listen on a Docker-reachable host interface; if so, configure Ollama's `OLLAMA_HOST` and firewall to allow only the required Docker bridge. Do not expose either service broadly to the LAN.
+Compose publishes the gateway on `127.0.0.1:8000` by default and points its container to Ollama at `host.docker.internal:11434` using Docker's `host-gateway` mapping. Set `OLLAMA_DOCKER_BASE_URL` in `.env` if Ollama is reachable at a different URL from inside the container; this is separate from the native `OLLAMA_BASE_URL`. Atlas Network Access must allow the host/container's public egress IP. If Open WebUI runs in a different container, add `host.docker.internal:host-gateway` to its `extra_hosts` and use `http://host.docker.internal:8000/v1`. If host-gateway routing is unavailable, place both containers on one Docker network and address the gateway by its Compose service name. The gateway container may need Ollama to listen on a Docker-reachable host interface; if so, configure Ollama's `OLLAMA_HOST` and firewall to allow only the required Docker bridge. Do not expose either service broadly to the LAN.
 
 The Docker image installs the `loader` optional dependencies so PDF and office documents can be parsed. Rebuild and recreate the container after changing the Dockerfile with `docker compose up --build -d`.
 
@@ -290,3 +307,7 @@ ruff check src tests scripts
 - [Ollama OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md)
 - [Open WebUI OpenAI-compatible connections](https://docs.openwebui.com/getting-started/api-endpoints/)
 - [FastAPI deployment](https://fastapi.tiangolo.com/deployment/)
+
+## License
+
+This project is distributed under the [MIT License](LICENSE).

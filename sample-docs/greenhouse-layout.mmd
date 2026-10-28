@@ -1,0 +1,14 @@
+flowchart LR
+    Visitor[Visitor] --> Portal[Community portal]
+    Portal --> SensorHub[Sensor hub]
+    SensorHub --> BedA[North bed]
+    SensorHub --> BedB[South bed]
+    SensorHub --> Reservoir[Rainwater reservoir]
+    BedA -->|soil moisture| SensorHub
+    BedB -->|soil moisture| SensorHub
+
+    subgraph Greenhouse["Fictional community greenhouse"]
+        BedA
+        BedB
+        Reservoir
+    end
