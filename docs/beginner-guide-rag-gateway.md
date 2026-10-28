@@ -1,0 +1,264 @@
+# Beginner's Guide: Atlas RAG Gateway
+
+This guide explains how the application turns documents into answers with sources, where the main responsibilities live in the code, and how a client such as Open WebUI or Hermes uses it. The [French version](guide-debutant-rag-gateway.md) is also available.
+
+## 1. The Basics
+
+### RAG: retrieve before answering
+
+A language model answers using what it learned during training and the text it receives in its conversation. It does not automatically know your organization's private documents, and it can produce a plausible but inaccurate answer.
+
+RAG, short for *Retrieval-Augmented Generation*, adds a search step before generation:
+
+1. Turn the question into a search representation.
+2. Find relevant passages in a document collection.
+3. Add those passages to the conversation as evidence.
+4. Ask the model to answer from that evidence and say when evidence is missing.
+
+The gateway orchestrates this sequence. The local model generates the answer; MongoDB Atlas retrieves passages; Voyage AI converts text into search vectors.
+
+### Embeddings: represent meaning as a vector
+
+An embedding is a list of numbers calculated from text. Texts with similar meanings tend to produce nearby vectors. This makes it possible to find passages related to a question even when they do not use exactly the same words.
+
+By default, this application uses Voyage AI's `voyage-3.5` model to produce 1024-dimensional vectors. The same model is used for documents and questions, with distinct modes (`document` and `query`). The model's output dimensions, the `EMBEDDING_DIMENSIONS` setting, and the Atlas index must match.
+
+Search uses vector proximity with cosine similarity. Atlas returns a score; the application discards results below `RETRIEVAL_MIN_SCORE`, which defaults to `0.72`. Treat this threshold as a starting point to evaluate against your own questions, not a universal guarantee of relevance.
+
+### Chunking: split a document into passages
+
+A whole document is often too long to use as one search result. *Chunking* splits it into shorter passages that can be retrieved separately.
+
+The current code normalizes whitespace and line breaks, splits text into chunks of about `CHUNK_SIZE` characters, and keeps `CHUNK_OVERLAP` characters in common between neighboring chunks. Overlap reduces the chance of cutting an idea exactly at a chunk boundary.
+
+Chunking is character-based, not token-based. It does not yet preserve Markdown structure such as headings, tables, or sections.
+
+### Reranking: reorder search results
+
+Vector search selects candidate passages. A *reranker* is an additional step that examines the question and each passage together, then reorders them by more precise relevance.
+
+Reranking can improve the top results, but it usually adds a model call, latency, and cost. **This application does not currently rerank results.** It keeps Atlas's vector-search order and applies only a minimum score threshold. Hybrid text-plus-vector search is not implemented either.
+
+## 2. At a Glance
+
+The system has a local part and cloud services. Text sent to Voyage for embeddings and chunks/vectors stored in Atlas leave the local environment. Answer generation stays on the configured Ollama service.
+
+```mermaid
+flowchart LR
+    subgraph Local["Your workstation or local network"]
+        Docs[".txt and .md files"]
+        Script["scripts/ingest_folder.py"]
+        UI["Open WebUI"]
+        Agent["Hermes or another OpenAI-compatible client"]
+        GW["FastAPI: Atlas RAG Gateway"]
+        Ollama["Ollama: generation model"]
+        Docs --> Script
+        Script -->|"POST /v1/ingest"| GW
+        UI -->|"POST /v1/chat/completions"| GW
+        Agent -->|"POST /v1/chat/completions"| GW
+        GW -->|"augmented prompt"| Ollama
+    end
+
+    subgraph Cloud["Cloud services"]
+        Voyage["Voyage AI: embeddings"]
+        Atlas["MongoDB Atlas: chunks and vector search"]
+    end
+
+    GW -->|"document or question text"| Voyage
+    GW -->|"vectors and filtered search"| Atlas
+```
+
+## 3. Code Structure
+
+Application code is under `src/rag_gateway/`. Each module has one main responsibility.
+
+| File | Responsibility |
+| --- | --- |
+| [main.py](../src/rag_gateway/main.py) | Starts FastAPI, checks authentication, exposes HTTP routes, and coordinates ingestion, retrieval, and generation. |
+| [config.py](../src/rag_gateway/config.py) | Reads environment settings and validates values such as chunk size and overlap. |
+| [models.py](../src/rag_gateway/models.py) | Defines the data expected by the ingestion API and its response. |
+| [chunking.py](../src/rag_gateway/chunking.py) | Splits text into overlapping chunks. |
+| [voyage.py](../src/rag_gateway/voyage.py) | Calls Voyage's embedding API, batches texts, and retries selected transient errors. |
+| [store.py](../src/rag_gateway/store.py) | Writes, replaces, deletes, and searches chunks in MongoDB Atlas. |
+| [rag.py](../src/rag_gateway/rag.py) | Creates question embeddings, assembles sources into the prompt, and extracts a query from chat history. |
+| [document_loader.py](../src/rag_gateway/document_loader.py) | Scans directories, extracts multiple formats, calls the configured Ollama OCR model for pages/images, and reports progress. |
+| [scripts/ingest_folder.py](../scripts/ingest_folder.py) | Scans a local folder and sends text/Markdown files to the API. |
+| [scripts/document_loader.py](../scripts/document_loader.py) | CLI for the Ollama multi-format loader. |
+| [infra/atlas-vector-index.json](../infra/atlas-vector-index.json) | Example Vector Search index definition to create in Atlas. |
+| [compose.yaml](../compose.yaml) | Describes the optional Docker Compose deployment. |
+
+### Main HTTP routes
+
+The `/v1/*` routes require a bearer token. When `API_KEY_REGISTRY` is empty, the token must match `GATEWAY_API_KEY`. When the registry is configured, the key must be registered and authorized for the requested tenant.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/models` | Advertises the model name exposed by the gateway, `rag-local` by default. |
+| `POST /v1/ingest` | Receives a document, chunks it, creates embeddings, and stores the chunks. |
+| `DELETE /v1/documents/{document_id}` | Deletes a document for the selected tenant. |
+| `POST /v1/retrieve` | Searches for and returns passages matching a question, without generating an answer. |
+| `POST /v1/chat/completions` | Retrieves evidence, augments the conversation, and sends the request to Ollama. |
+| `GET /healthz` and `GET /readyz` | Check, respectively, whether the process responds and whether essential dependencies/configuration are available. |
+
+## 4. How a Document Is Ingested
+
+Ingestion prepares data for future searches. It does not ask the chat model to write an answer yet. The original `scripts/ingest_folder.py` only handles UTF-8 `.txt` and `.md` files.
+
+1. `scripts/ingest_folder.py` recursively scans a folder and selects UTF-8 `.txt` and `.md` files.
+2. For each file, the script sends its text, relative path as `document_id`, a `tenant_id`, and metadata to `POST /v1/ingest`.
+3. FastAPI validates the request body, checks the `MAX_DOCUMENT_CHARS` limit, and asks the chunking module to split the text.
+4. `VoyageEmbedder` sends the chunks to Voyage with `input_type=document`. Requests are limited by `EMBEDDING_BATCH_SIZE` and an estimated token budget; selected transient errors are retried with backoff.
+5. `AtlasStore` stores each chunk with its vector, tenant, document, position, metadata, embedding model and dimensions, chunking policy, and a SHA-256 hash of the text.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Operator
+    participant Script as ingest_folder.py
+    participant API as FastAPI / Gateway
+    participant Chunker as chunking.py
+    participant Voyage as Voyage AI
+    participant Store as AtlasStore
+    participant Atlas as MongoDB Atlas
+
+    Operator->>Script: Folder, tenant, gateway URL
+    loop For each .txt or .md file
+        Script->>Script: Read file and determine relative path
+        Script->>API: POST /v1/ingest + bearer + text/metadata
+        API->>API: Validate document and size
+        API->>Chunker: chunk_text(text, size, overlap)
+        Chunker-->>API: List of chunks
+        API->>Voyage: Embeddings (input_type=document)
+        Voyage-->>API: Vectors
+        API->>Store: replace_document(tenant, document, chunks, vectors)
+        Store->>Atlas: Bulk upsert chunks
+        Store->>Atlas: Delete excess old chunks
+        Atlas-->>API: Write result
+        API-->>Script: Number of chunks stored
+    end
+    Script-->>Operator: Summary of processed files and failures
+```
+
+Chunk IDs are deterministic for a tenant, document, and chunk position. Re-ingesting a file replaces its chunks and removes excess chunks if the new document is shorter. However, the script does not synchronize file deletions: if a file disappears from the folder, its document stays in Atlas until explicitly deleted.
+
+Direct ingestion is also possible by calling `POST /v1/ingest` with a JSON body containing `tenant_id`, `document_id`, `text`, and optional `metadata`.
+
+### Ollama multi-format loader
+
+The loader shares the `document_loader.py` engine between a CLI and a local web interface. The default OCR model is `glm-ocr:latest`: PDF pages are rendered as images and sent through Ollama's local API; PNG, JPEG, TIFF, and BMP images use the same path. Text, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM, and PPTX use local extractors. For DOCX and PPTX, text and tables are extracted, but embedded images are not analyzed in this version. When the web loader is enabled, application startup logs Ollama's discovered models.
+
+Install the optional libraries and check that the configured model is available in Ollama:
+
+```bash
+python -m pip install -e ".[dev,loader]"
+```
+
+NVIDIA's model card documents Transformers and vLLM, not an official Ollama distribution. Use a compatible local Ollama package/build and verify that it accepts image requests before processing a large corpus. The loader checks whether the configured tag appears in Ollama's model list, but its presence alone does not guarantee architecture compatibility.
+
+Example CLI usage with explicit include and exclude filters:
+
+```bash
+export GATEWAY_API_KEY="your-local-key"
+python scripts/document_loader.py ./sample-docs --tenant default \
+    --include .pdf,.txt,.md,.docx,.xlsx,.pptx,.csv,.html \
+    --exclude .log
+```
+
+Scanning is recursive by default. The CLI reports the current stage and file, continues after individual failures, and prints an overall summary at the end.
+
+For the browser interface, explicitly allow the directories readable from the gateway host. The feature is disabled by default because it can access local files:
+
+```dotenv
+DOCUMENT_LOADER_ENABLED=true
+DOCUMENT_LOADER_ROOTS=["/data/policies","/data/handbooks"]
+DOCUMENT_PARSER_MODEL=glm-ocr:latest
+```
+
+After restarting the service, open `http://127.0.0.1:8000/tools/document-loader`, enter a bearer token, choose file types, and start a job. The page shows the current file, eligible/processed/succeeded/failed counts, skipped files, and recent events. Jobs and history are held in memory only and are lost when the service restarts. Web access is restricted to paths under `DOCUMENT_LOADER_ROOTS` and tenants allowed by the key. Each source file is limited to 50 MiB, and extracted text must fit within `MAX_DOCUMENT_CHARS`.
+
+## 5. How a Question Becomes an Answer
+
+A user types in Open WebUI or sends a request from Hermes. These applications do not query Atlas themselves; they call the gateway, which applies the same retrieval logic regardless of the client.
+
+1. The client sends an OpenAI-compatible request to `POST /v1/chat/completions`, with `messages`, a bearer token, and optionally `X-Tenant-ID`.
+2. The gateway extracts the last three non-empty user messages and combines them to provide some context for follow-up questions, such as “what about backups?”
+3. The combined question is sent to Voyage with `input_type=query` to obtain a vector.
+4. Atlas searches for the nearest chunks within the authorized tenant. The pipeline applies `RETRIEVAL_TOP_K`, then keeps results whose score is greater than or equal to `RETRIEVAL_MIN_SCORE`.
+5. The gateway adds the retrieved passages to a system message. Sources are labeled `[S1]`, `[S2]`, and so on. Document text is treated as untrusted data: selected prompt and citation markers are neutralized, and the evidence block uses a random delimiter.
+6. The augmented request is sent to Ollama's local chat API.
+7. The response is returned to the client. In non-streaming mode, sources are in the response's `sources` field. In streaming mode, they appear in an initial SSE event using a non-standard `sources` extension; some clients may ignore it.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Client as Open WebUI / Hermes / other client
+    participant GW as Atlas RAG Gateway
+    participant Voyage as Voyage AI
+    participant Atlas as MongoDB Atlas
+    participant Ollama as Local Ollama
+
+    User->>Client: Ask a question
+    Client->>GW: POST /v1/chat/completions + bearer + tenant
+    GW->>GW: Read recent user turns
+    GW->>Voyage: Embed question (input_type=query)
+    Voyage-->>GW: Query vector
+    GW->>Atlas: $vectorSearch with tenant filter
+    Atlas-->>GW: Candidate chunks and scores
+    GW->>GW: Discard scores below threshold
+    GW->>GW: Add evidence to prompt with [S1], [S2] citations
+    GW->>Ollama: Augmented conversation
+    Ollama-->>GW: Answer, possibly as SSE
+    GW-->>Client: Answer and source metadata
+    Client-->>User: Display answer
+```
+
+If no source meets the threshold, the gateway tells the model that no relevant evidence was found and asks it not to invent source-backed facts. This reduces hallucination risk but does not, by itself, guarantee that every answer is correct.
+
+## 6. Using Hermes, Open WebUI, or Another Client
+
+The client must be able to call an OpenAI-compatible chat API. It does not need RAG-specific code: it sends the conversation to the gateway, which performs retrieval and calls Ollama.
+
+- Base URL when the client runs on the same host: `http://localhost:8000/v1`.
+- From a Docker container, an address such as `http://host.docker.internal:8000/v1` may be needed; routing depends on Docker networking and the gateway's listen address.
+- Model name to select: `rag-local` by default. The application then passes the `OLLAMA_MODEL` value to Ollama.
+- Authentication: a shared bearer token or a key registered in `API_KEY_REGISTRY`.
+- Tenant: `X-Tenant-ID` for retrieval, chat, and deletion; the ingestion body contains `tenant_id`.
+
+The exact configuration fields vary between Hermes and Open WebUI versions. If a client cannot add `X-Tenant-ID`, configure its custom-header support or call the API with its HTTP tool. In registry mode, a key is authorized only for the tenants explicitly associated with its hash.
+
+## 7. Configuration and Limitations
+
+Settings are stored in `.env`; `.env.example` lists the names and starting values. The web loader is controlled by `DOCUMENT_LOADER_ENABLED`, `DOCUMENT_LOADER_ROOTS`, and `DOCUMENT_LOADER_MAX_ACTIVE_JOBS`. `DOCUMENT_PARSER_MODEL` and `DOCUMENT_PARSER_TIMEOUT_SECONDS` configure the Ollama parser. Other important settings include:
+
+| Setting | Purpose |
+| --- | --- |
+| `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION` | Atlas connection and location of stored chunks. |
+| `MONGODB_API_MODEL_ENDPOINT` | MongoDB API model service hostname; defaults to `ai.mongodb.com`. |
+| `ATLAS_VECTOR_INDEX` | Name of the Vector Search index already created in Atlas. |
+| `VOYAGE_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Embedding service and vector format. |
+| `GATEWAY_API_KEY` or `API_KEY_REGISTRY` | Shared authentication or static key-to-tenant authorization. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local generation service address and model. Compose overrides `OLLAMA_BASE_URL` in the container to reach the host. |
+| `CHUNK_SIZE`, `CHUNK_OVERLAP` | Character-based document chunking. |
+| `EMBEDDING_BATCH_SIZE` | Maximum texts per Voyage request, in addition to the estimated token budget. |
+| `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Maximum result count and minimum accepted score. |
+
+Embeddings and storage are cloud services in this architecture: source text and questions are sent to Voyage, while chunks and their vectors are stored in Atlas. Check your organization's data classification and policies before using real documents.
+
+The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It also has no reranker, hybrid search, evaluation set, Prometheus metrics, or document-level ACL filtering. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
+
+## 8. Quick Start
+
+After installing dependencies and configuring `.env`, start the API with:
+
+```bash
+python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
+```
+
+Before the first search, MongoDB Atlas must be reachable, the configured Vector Search index must be `READY`, the Voyage key must be configured, and Ollama must serve the selected chat model. See the [project README](../README.md) for platform-specific installation instructions.
+
+Run the repository's automated tests with:
+
+```bash
+python -m pytest -q
+```

@@ -1,0 +1,109 @@
+<mxfile host="65bd71144e">
+    <diagram id="atlas-rag-architecture" name="System Architecture">
+        <mxGraphModel dx="958" dy="616" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1440" pageHeight="800" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;" value="Atlas RAG Gateway | System Architecture" vertex="1">
+                    <mxGeometry height="40" width="700" x="30" y="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="boundary-local" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 8;fillColor=#f7fbfa;strokeColor=#63a89d;strokeWidth=2;verticalAlign=top;align=left;fontStyle=1;fontSize=14;spacingTop=10;spacingLeft=12;" value="LOCAL / ON-PREM" vertex="1">
+                    <mxGeometry height="650" width="650" x="20" y="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="boundary-cloud" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 8;fillColor=#fcfaf5;strokeColor=#d5a34c;strokeWidth=2;verticalAlign=top;align=left;fontStyle=1;fontSize=14;spacingTop=10;spacingLeft=12;" value="CLOUD SERVICES" vertex="1">
+                    <mxGeometry height="650" width="650" x="730" y="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e5f4f0;strokeColor=#288879;strokeWidth=2;fontSize=15;fontStyle=1;" value="Local TXT / Markdown files&#xa;Folder ingester" vertex="1">
+                    <mxGeometry height="80" width="220" x="55" y="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="webui" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f1fa;strokeColor=#4d82b4;strokeWidth=2;fontSize=15;fontStyle=1;" value="Open WebUI&#xa;Chat client" vertex="1">
+                    <mxGeometry height="80" width="220" x="55" y="310" as="geometry"/>
+                </mxCell>
+                <mxCell id="hermes" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9e9e4;strokeColor=#bd7057;strokeWidth=2;fontSize=15;fontStyle=1;" value="Hermes agent&#xa;OpenAI-compatible client" vertex="1">
+                    <mxGeometry height="80" width="220" x="55" y="500" as="geometry"/>
+                </mxCell>
+                <mxCell id="gateway" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff1cc;strokeColor=#c08a20;strokeWidth=3;fontSize=16;fontStyle=1;" value="FastAPI RAG Gateway&#xa;Authentication | chunking | retrieval&#xa;OpenAI-compatible chat API" vertex="1">
+                    <mxGeometry height="130" width="250" x="370" y="320" as="geometry"/>
+                </mxCell>
+                <mxCell id="voyage" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9e9e4;strokeColor=#bd7057;strokeWidth=2;fontSize=15;fontStyle=1;" value="Voyage AI&#xa;Embeddings API&#xa;Document + query vectors" vertex="1">
+                    <mxGeometry height="100" width="230" x="900" y="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="atlas" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f2e2;strokeColor=#62934b;strokeWidth=2;fontSize=15;fontStyle=1;" value="MongoDB Atlas&#xa;Vector Search index&#xa;Chunks + metadata + vectors" vertex="1">
+                    <mxGeometry height="110" width="230" x="900" y="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="ollama" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f1fa;strokeColor=#4d82b4;strokeWidth=2;fontSize=15;fontStyle=1;" value="Ollama&#xa;Local chat model&#xa;Generation stays on-prem" vertex="1">
+                    <mxGeometry height="100" width="230" x="380" y="600" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-files" edge="1" parent="1" source="files" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="gateway" value="Ingest document">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-webui-in" edge="1" parent="1" source="webui" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="gateway" value="Chat request">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-hermes-in" edge="1" parent="1" source="hermes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="gateway" value="Chat / agent request">
+                    <mxGeometry relative="1" x="0.1273" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="410" y="540"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-gateway-voyage" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="voyage" value="Text to embed&#xa;(HTTPS)">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1015" y="340"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-voyage-gateway" edge="1" parent="1" source="voyage" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;dashed=1;" target="gateway" value="Embedding vectors">
+                    <mxGeometry relative="1" x="0.1652" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="570" y="190"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-gateway-atlas" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="atlas" value="Chunks + vectors&#xa;upsert / $vectorSearch">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="760" y="370"/>
+                            <mxPoint x="760" y="370"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-atlas-gateway" edge="1" parent="1" source="atlas" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;dashed=1;" target="gateway" value="Tenant-filtered&#xa;top-k evidence">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="760" y="405"/>
+                            <mxPoint x="760" y="405"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-gateway-ollama" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;" target="ollama" value="Augmented prompt&#xa;(local network)">
+                    <mxGeometry relative="1" x="0.1067" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="540" y="520"/>
+                            <mxPoint x="540" y="520"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-ollama-gateway" edge="1" parent="1" source="ollama" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;dashed=1;" target="gateway" value="Completion / stream">
+                    <mxGeometry relative="1" x="0.1294" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="480" y="520"/>
+                            <mxPoint x="480" y="520"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e-gateway-webui" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;dashed=1;" target="webui" value="Answer + [S1] citations">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-gateway-hermes" edge="1" parent="1" source="gateway" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;dashed=1;" target="hermes" value="Answer">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="165" y="420"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

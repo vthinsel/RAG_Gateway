@@ -1,0 +1,29 @@
+services:
+  rag-gateway:
+    build: .
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
+    ports:
+      - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local document loader</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #ffffff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --green-soft: #dcefe5;
+      --blue: #205c87;
+      --red: #a63d35;
+      --yellow: #f0c663;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 15px/1.5 "Segoe UI", "Aptos", sans-serif;
+    }
+    header {
+      background: #153b3e;
+      color: #f6f8f3;
+      padding: 28px max(24px, calc((100vw - 1060px) / 2));
+      border-bottom: 5px solid var(--yellow);
+    }
+    header h1 { margin: 0; font-size: 25px; font-weight: 650; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 28px auto; padding: 0 20px 36px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 20px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; }
+    h2 { font-size: 17px; margin: 0 0 16px; }
+    .field { display: grid; gap: 5px; margin-bottom: 14px; }
+    label { color: #294549; font-size: 13px; font-weight: 650; }
+    input, select {
+      width: 100%; min-height: 40px; border: 1px solid #afc1ba; border-radius: 4px;
+      background: #fff; color: var(--ink); padding: 8px 10px; font: inherit;
+    }
+    input:focus, select:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .check { display: flex; align-items: center; gap: 9px; margin: 2px 0 16px; }
+    .check input { width: 18px; min-height: 18px; accent-color: var(--green); }
+    .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    button {
+      min-height: 40px; border: 1px solid var(--green); border-radius: 4px;
+      background: var(--green); color: white; padding: 8px 14px; font: inherit; font-weight: 650;
+      cursor: pointer;
+    }
+    button.secondary { background: white; color: var(--green); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+    .status-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .badge { background: var(--green-soft); color: #145b4a; padding: 3px 9px; border-radius: 3px; font-size: 12px; font-weight: 700; }
+    .badge.error { background: #f8e4df; color: var(--red); }
+    progress { width: 100%; height: 12px; margin: 16px 0 10px; accent-color: var(--green); }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 6px 0 18px; }
+    .stat { border-left: 3px solid #8bb9a8; background: #f4f8f4; padding: 7px 9px; }
+    .stat strong { display: block; font-size: 19px; line-height: 1.2; }
+    .stat span { color: var(--muted); font-size: 11px; }
+    #current { min-height: 24px; overflow-wrap: anywhere; color: var(--blue); font-weight: 600; }
+    #events { list-style: none; padding: 0; margin: 10px 0 0; max-height: 300px; overflow: auto; }
+    #events li { border-top: 1px solid #e4ebe6; padding: 7px 1px; font-size: 13px; overflow-wrap: anywhere; }
+    #message { min-height: 22px; color: var(--red); margin: 9px 0 0; }
+    @media (max-width: 760px) {
+      header { padding: 22px 20px; }
+      .layout { grid-template-columns: 1fr; }
+      main { margin-top: 18px; }
+    }
+    @media (max-width: 420px) {
+      .two { grid-template-columns: 1fr; gap: 0; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      section { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Local document loader</h1>
+    <p>Parse supported files with an Ollama OCR model and send extracted text to the RAG gateway.</p>
+  </header>
+  <main>
+    <div class="layout">
+      <section aria-labelledby="settings-title">
+        <h2 id="settings-title">Job settings</h2>
+        <form id="loader-form">
+          <div class="field">
+            <label for="directory">Directory on the gateway host</label>
+            <input id="directory" name="directory" required placeholder="C:\\Data\\Policies or /data/policies">
+          </div>
+          <div class="two">
+            <div class="field">
+              <label for="tenant">Tenant ID</label>
+              <input id="tenant" name="tenant" value="default" required>
+            </div>
+            <div class="field">
+              <label for="model">Parser model in Ollama</label>
+              <select id="model" name="model"></select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="token">Gateway bearer token</label>
+            <input id="token" name="token" type="password" required autocomplete="off">
+          </div>
+          <div class="two">
+            <div class="field">
+              <label for="include">Include extensions (comma-separated)</label>
+              <input id="include" name="include" placeholder=".pdf,.txt,.md,.docx">
+            </div>
+            <div class="field">
+              <label for="exclude">Exclude extensions (comma-separated)</label>
+              <input id="exclude" name="exclude" placeholder=".log,.csv">
+            </div>
+          </div>
+          <label class="check"><input id="recursive" type="checkbox" checked> Scan subdirectories recursively</label>
+          <div class="buttons">
+            <button type="button" class="secondary" id="refresh-models">Check Ollama models</button>
+            <button type="submit" id="start">Start loading</button>
+          </div>
+          <p class="note">The web loader can only read directories listed in DOCUMENT_LOADER_ROOTS. Extracted document text is sent to the configured embedding service and Atlas.</p>
+          <p id="message" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section aria-labelledby="status-title">
+        <div class="status-line">
+          <h2 id="status-title">Overall status</h2>
+          <span class="badge" id="status">Idle</span>
+        </div>
+        <progress id="progress" max="100" value="0"></progress>
+        <div class="stats">
+          <div class="stat"><strong id="eligible">0</strong><span>eligible</span></div>
+          <div class="stat"><strong id="processed">0</strong><span>processed</span></div>
+          <div class="stat"><strong id="succeeded">0</strong><span>succeeded</span></div>
+          <div class="stat"><strong id="failed">0</strong><span>failed</span></div>
+        </div>
+        <div id="current">No active job</div>
+        <ul id="events" aria-live="polite"></ul>
+      </section>
+    </div>
+  </main>
+  <script>
+    const form = document.querySelector("#loader-form");
+    const tokenInput = document.querySelector("#token");
+    const modelSelect = document.querySelector("#model");
+    const message = document.querySelector("#message");
+    const eventsList = document.querySelector("#events");
+    let activeJob = null;
+
+    function extensions(value) {
+      return value.split(",").map(item => item.trim()).filter(Boolean);
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Authorization": `Bearer ${tokenInput.value.trim()}`,
+          "Content-Type": "application/json",
+          ...(options.headers || {})
+        }
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+      return data;
+    }
+
+    document.querySelector("#refresh-models").addEventListener("click", async () => {
+      message.textContent = "";
+      try {
+        const data = await api("/v1/document-loader/models");
+        modelSelect.replaceChildren();
+        for (const model of data.models) {
+          const option = document.createElement("option");
+          option.value = model;
+          option.textContent = model;
+          option.selected = model.toLowerCase() === data.configured_model.toLowerCase();
+          modelSelect.append(option);
+        }
+        if (!data.models.length) throw new Error("No models are installed in Ollama.");
+        message.style.color = "#176f5b";
+        message.textContent = `${data.models.length} Ollama model(s) available.`;
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      }
+    });
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      message.style.color = "#a63d35";
+      message.textContent = "";
+      document.querySelector("#start").disabled = true;
+      try {
+        const data = await api("/v1/document-loader/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            directory: document.querySelector("#directory").value.trim(),
+            tenant_id: document.querySelector("#tenant").value.trim(),
+            recursive: document.querySelector("#recursive").checked,
+            include_extensions: extensions(document.querySelector("#include").value).length
+              ? extensions(document.querySelector("#include").value)
+              : null,
+            exclude_extensions: extensions(document.querySelector("#exclude").value),
+            model: modelSelect.value || null
+          })
+        });
+        activeJob = data.job_id;
+        eventsList.replaceChildren();
+        pollJob();
+      } catch (error) {
+        message.textContent = error.message;
+        document.querySelector("#start").disabled = false;
+      }
+    });
+
+    async function pollJob() {
+      if (!activeJob) return;
+      try {
+        const job = await api(`/v1/document-loader/jobs/${activeJob}`);
+        document.querySelector("#status").textContent = job.status.replaceAll("_", " ");
+        document.querySelector("#status").classList.toggle("error", job.failed > 0);
+        for (const [id, key] of [["eligible", "eligible"], ["processed", "processed"], ["succeeded", "succeeded"], ["failed", "failed"]]) {
+          document.querySelector(`#${id}`).textContent = job[key] || 0;
+        }
+        const done = job.processed || 0;
+        const total = job.eligible || 0;
+        document.querySelector("#progress").value = total ? Math.round((done / total) * 100) : (job.status.startsWith("completed") ? 100 : 0);
+        document.querySelector("#current").textContent = job.status.startsWith("completed") ? "Loading finished" : (job.current_file || "Preparing scan");
+        eventsList.replaceChildren();
+        for (const event of (job.events || []).slice(-40)) {
+          const item = document.createElement("li");
+          item.textContent = `${event.stage}: ${event.message}`;
+          eventsList.append(item);
+        }
+        const terminal = ["completed", "completed_with_errors", "failed"].includes(job.status);
+        if (terminal) {
+          activeJob = null;
+          document.querySelector("#start").disabled = false;
+          message.style.color = job.failed ? "#a63d35" : "#176f5b";
+          message.textContent = `${job.succeeded || 0} succeeded, ${job.failed || 0} failed, ${job.skipped || 0} skipped.`;
+          return;
+        }
+        window.setTimeout(pollJob, 900);
+      } catch (error) {
+        activeJob = null;
+        document.querySelector("#start").disabled = false;
+        message.textContent = error.message;
+      }
+    }
+  </script>
+</body>
+</html>
