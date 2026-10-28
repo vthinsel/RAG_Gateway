@@ -25,7 +25,7 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 
 The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, document ACL filtering, reranking, and a labeled evaluation harness remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, document ACL filtering, and reranking remain later phases.
 
 ## Build Plan
 
@@ -220,6 +220,9 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Configuration and Atlas readiness |
 | `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials |
+| `GET /tools/evaluation` | Browser workbench for retrieval metrics against manually labeled questions |
+| `POST /v1/evaluations/retrieval` | Run retrieval hit-rate, recall, ranking, and latency evaluation cases |
+| `POST /v1/document-loader/preview` | Extract and preview one uploaded document without ingesting it |
 | `GET /v1/admin/environment` | Admin-only redacted settings snapshot |
 | `PUT /v1/admin/environment` | Admin-only persistent settings update |
 | `POST /v1/admin/environment/gateway-api-key` | Admin-only generation of a new key, returned once and not persisted until saved |
@@ -238,7 +241,7 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `POST /v1/retrieve` | Inspect top-k chunks for a query |
 | `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama |
 
-The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The page uses the gateway bearer key; keys managed by `API_KEY_REGISTRY` can only view and delete their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
+The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs; metrics report hit rate, recall, mean reciprocal rank, and latency for retrieval only, not generated-answer quality. The evaluation API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use the gateway bearer key; keys managed by `API_KEY_REGISTRY` can only access their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
 
 Example ingestion body:
 
@@ -298,7 +301,7 @@ ruff check src tests scripts
 - Similarity search is the only retrieval mode. Evaluate reranking, hybrid full-text/vector retrieval, metadata/ACL filters, and query rewriting against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
-- There is no evaluation harness, reranker, hybrid search, structured request logging, or Prometheus metrics yet. Calibrate retrieval settings and evaluate quality before enabling further retrieval changes.
+- Evaluation currently measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness, reranker, hybrid search, structured request logging, and Prometheus metrics remain future work.
 
 ## References
 

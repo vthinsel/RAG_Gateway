@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retrieval evaluation</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --green-soft: #dcefe5;
+      --red: #a63d35;
+      --yellow: #f0c663;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 "Segoe UI", "Aptos", sans-serif; }
+    header { background: #153b3e; color: #f6f8f3; padding: 28px max(24px, calc((100vw - 1060px) / 2)); border-bottom: 5px solid var(--yellow); }
+    header h1 { margin: 0; font-size: 25px; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 28px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; margin-bottom: 18px; }
+    h2 { font-size: 17px; margin: 0 0 14px; }
+    .field { display: grid; gap: 5px; margin-bottom: 14px; }
+    label { color: #294549; font-size: 13px; font-weight: 650; }
+    input, textarea { width: 100%; border: 1px solid #afc1ba; border-radius: 4px; background: #fff; color: var(--ink); padding: 9px 10px; font: inherit; }
+    input { min-height: 40px; }
+    textarea { min-height: 250px; resize: vertical; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    input:focus, textarea:focus, button:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
+    .two { display: grid; grid-template-columns: 1fr 180px; gap: 12px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: #fff; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--green); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+    #message { min-height: 22px; color: var(--red); margin: 9px 0 0; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px; }
+    .metric { background: #f4f8f4; border-left: 3px solid #8bb9a8; padding: 10px; }
+    .metric strong { display: block; font-size: 22px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #294549; font-size: 13px; }
+    td { font-size: 13px; overflow-wrap: anywhere; }
+    .hit { color: var(--green); font-weight: 700; }
+    .miss { color: var(--red); font-weight: 700; }
+    code { overflow-wrap: anywhere; }
+    @media (max-width: 620px) {
+      header { padding: 22px 18px; }
+      main { margin-top: 18px; padding: 0 12px 24px; }
+      section { padding: 16px; }
+      .two { grid-template-columns: 1fr; gap: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Retrieval evaluation</h1>
+    <p>Measure whether known relevant documents appear in the gateway's retrieved results.</p>
+  </header>
+  <main>
+    <section aria-labelledby="setup-title">
+      <h2 id="setup-title">Evaluation set</h2>
+      <p class="note">Enter questions and the exact document IDs expected to answer each one. Hit rate counts cases with any expected document in the top K; recall measures expected document coverage; reciprocal rank rewards an expected document appearing earlier. Latency includes embedding and Atlas search. The workbench evaluates retrieval only; it does not call the chat model or judge answer correctness.</p>
+      <div class="two">
+        <div class="field">
+          <label for="tenant">Tenant ID</label>
+          <input id="tenant" value="default" maxlength="256" required>
+        </div>
+        <div class="field">
+          <label for="top-k">Top K</label>
+          <input id="top-k" type="number" min="1" max="50" value="5">
+        </div>
+      </div>
+      <div class="field">
+        <label for="token">Gateway bearer token</label>
+        <input id="token" type="password" autocomplete="off" required>
+        <span class="note">Enter the actual GATEWAY_API_KEY secret value, not the text “GATEWAY_API_KEY”. Do not add the “Bearer ” prefix; the page adds it. Restart the gateway after changing its authentication configuration.</span>
+      </div>
+      <div class="field">
+        <label for="cases">Cases (JSON array)</label>
+        <textarea id="cases" spellcheck="false" aria-describedby="cases-note"></textarea>
+        <span id="cases-note" class="note">Each case needs a <code>query</code> and one or more exact <code>expected_document_ids</code>. Maximum 100 cases per run.</span>
+      </div>
+      <div class="buttons">
+        <button type="button" class="secondary" id="load-example">Load example cases</button>
+        <button type="button" id="run-evaluation">Run evaluation</button>
+      </div>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section aria-labelledby="metrics-title">
+      <h2 id="metrics-title">Results</h2>
+      <div id="metrics" class="metrics" aria-live="polite">
+        <div class="metric"><strong>—</strong><span>Run an evaluation to see metrics</span></div>
+      </div>
+    </section>
+    <section aria-labelledby="cases-title">
+      <h2 id="cases-title">Case details</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Query</th><th>Expected documents</th><th>Retrieved documents and scores</th><th>Hit</th><th>Latency</th></tr></thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    const exampleCases = [
+      { query: "How long are audit events retained?", expected_document_ids: ["retention-policy.md"] },
+      { query: "What crops grow in the south bed?", expected_document_ids: ["watering-notes.docx", "greenhouse-harvest.xlsx"] },
+      { query: "When is support available?", expected_document_ids: ["service-handbook.md"] }
+    ];
+    const casesInput = document.querySelector("#cases");
+    const message = document.querySelector("#message");
+    const resultsBody = document.querySelector("#results");
+    const metrics = document.querySelector("#metrics");
+    casesInput.value = JSON.stringify(exampleCases, null, 2);
+
+    function metricCard(label, value) {
+      const card = document.createElement("div");
+      card.className = "metric";
+      const number = document.createElement("strong");
+      number.textContent = value;
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      card.append(number, caption);
+      return card;
+    }
+
+    function cell(text) {
+      const element = document.createElement("td");
+      element.textContent = text;
+      return element;
+    }
+
+    function renderResults(data) {
+      const values = data.metrics;
+      metrics.replaceChildren(
+        metricCard("Cases", String(values.case_count)),
+        metricCard("Hit rate @ K", `${(values.hit_rate_at_k * 100).toFixed(1)}%`),
+        metricCard("Recall @ K", `${(values.recall_at_k * 100).toFixed(1)}%`),
+        metricCard("Mean reciprocal rank", values.mean_reciprocal_rank.toFixed(3)),
+        metricCard("Mean latency", `${values.mean_latency_ms.toFixed(0)} ms`)
+      );
+      resultsBody.replaceChildren();
+      for (const result of data.cases) {
+        const row = document.createElement("tr");
+        row.append(
+          cell(result.query),
+          cell(result.expected_document_ids.join(", "))
+        );
+        const retrieved = document.createElement("td");
+        retrieved.textContent = result.sources.map(source =>
+          `${source.document_id} · chunk ${source.chunk_index} · ${source.score.toFixed(3)}`
+        ).join("\n") || "No results";
+        retrieved.style.whiteSpace = "pre-line";
+        row.append(retrieved);
+        const hit = cell(result.hit ? "Yes" : "No");
+        hit.className = result.hit ? "hit" : "miss";
+        row.append(hit, cell(`${result.latency_ms.toFixed(0)} ms`));
+        resultsBody.append(row);
+      }
+    }
+
+    document.querySelector("#load-example").addEventListener("click", () => {
+      casesInput.value = JSON.stringify(exampleCases, null, 2);
+      message.textContent = "";
+    });
+
+    document.querySelector("#run-evaluation").addEventListener("click", async event => {
+      message.textContent = "";
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        let cases;
+        try {
+          cases = JSON.parse(casesInput.value);
+        } catch {
+          throw new Error("Cases must be valid JSON.");
+        }
+        if (!Array.isArray(cases) || !cases.length) {
+          throw new Error("Add at least one evaluation case.");
+        }
+        const token = document.querySelector("#token").value.trim();
+        if (!token) throw new Error("Enter a gateway bearer token.");
+        const response = await fetch("/v1/evaluations/retrieval", {
+          method: "POST",
+          headers: {
+            "Authorization": ["Bearer", token].join(" "),
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            tenant_id: document.querySelector("#tenant").value.trim(),
+            top_k: Number(document.querySelector("#top-k").value),
+            cases
+          })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (response.status === 401) throw new Error("Authentication failed. Enter the raw GATEWAY_API_KEY value (without “Bearer ”), or a registered tenant key. If you just changed authentication settings, restart the gateway.");
+          throw new Error(typeof data.detail === "string" ? data.detail : `Evaluation failed (${response.status}).`);
+        }
+        renderResults(data);
+        message.style.color = "#176f5b";
+        message.textContent = "Evaluation complete. Metrics use exact document ID matches.";
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

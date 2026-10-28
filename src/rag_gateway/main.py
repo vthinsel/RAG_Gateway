@@ -37,6 +37,7 @@ from rag_gateway.chunking import chunk_text
 from rag_gateway.config import Settings, get_settings
 from rag_gateway.document_loader import (
     MAX_SOURCE_FILE_BYTES,
+    SUPPORTED_EXTENSIONS,
     LoaderOptions,
     OllamaDocumentParser,
     load_directory,
@@ -46,7 +47,12 @@ from rag_gateway.document_loader import (
     IngestDocument as ParsedDocument,
 )
 from rag_gateway.environment import SECRET_FIELDS, save_settings, settings_response
-from rag_gateway.models import DocumentLoaderRequest, IngestDocument, IngestResult
+from rag_gateway.models import (
+    DocumentLoaderRequest,
+    IngestDocument,
+    IngestResult,
+    RetrievalEvaluationRequest,
+)
 from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder
@@ -491,6 +497,11 @@ async def document_loader_ui(settings: Settings = Depends(get_settings)) -> File
     return FileResponse(Path(__file__).parent / "static" / "document_loader.html")
 
 
+@app.get("/tools/evaluation", include_in_schema=False)
+async def evaluation_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "evaluation.html")
+
+
 @app.get("/tools/environment", include_in_schema=False)
 async def environment_ui() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "environment.html")
@@ -596,6 +607,86 @@ async def list_document_parser_models(
     finally:
         parser.close()
     return {"configured_model": settings.document_parser_model, "models": models}
+
+
+@app.post("/v1/document-loader/preview")
+async def preview_document(
+    file: UploadFile = File(...),
+    model: str | None = Form(default=None),
+    _allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    _require_document_loader(settings)
+    filename = Path(file.filename or "").name
+    extension = Path(filename).suffix.casefold()
+    if extension not in SUPPORTED_EXTENSIONS:
+        await file.close()
+        raise HTTPException(status_code=415, detail="Unsupported document type")
+
+    content = await file.read(MAX_SOURCE_FILE_BYTES + 1)
+    await file.close()
+    if len(content) > MAX_SOURCE_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="Document exceeds the 50 MiB upload limit")
+
+    parser = OllamaDocumentParser(
+        settings.ollama_base_url,
+        model or settings.document_parser_model,
+        settings.document_parser_timeout_seconds,
+    )
+    try:
+        if extension in {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
+            available_models = await asyncio.to_thread(parser.list_models)
+            matching_model = next(
+                (available for available in available_models if available.casefold() == parser.model.casefold()),
+                None,
+            )
+            if matching_model is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Parser model {parser.model!r} is not available in Ollama",
+                )
+            parser.model = matching_model
+        with tempfile.TemporaryDirectory(prefix="rag-gateway-preview-") as directory:
+            path = Path(directory) / f"preview{extension}"
+            await asyncio.to_thread(path.write_bytes, content)
+            try:
+                extracted_text = await asyncio.to_thread(parser.extract, path)
+            except httpx.HTTPError as error:
+                logger.warning(
+                    "Document preview OCR service failed: extension=%s error=%s",
+                    extension,
+                    type(error).__name__,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="The configured Ollama OCR service could not parse this document",
+                ) from error
+            except Exception as error:
+                logger.exception("Document preview parsing failed: extension=%s", extension)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Could not extract text from {filename!r}: {type(error).__name__}",
+                ) from error
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        raise HTTPException(status_code=502, detail="Could not query Ollama for parser models") from error
+    finally:
+        parser.close()
+
+    if not extracted_text.strip():
+        raise HTTPException(status_code=422, detail="No text could be extracted from this document")
+    if len(extracted_text) > settings.max_document_chars:
+        raise HTTPException(
+            status_code=413,
+            detail="Extracted text exceeds MAX_DOCUMENT_CHARS",
+        )
+    return {
+        "filename": filename,
+        "extension": extension,
+        "characters": len(extracted_text),
+        "text": extracted_text,
+    }
 
 
 async def _queue_document_loader_job(
@@ -960,7 +1051,7 @@ async def ingest_document(
             embeddings,
             body.metadata,
         )
-    except (httpx.HTTPError, RuntimeError) as error:
+    except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Ingestion failed: {error}") from error
     return IngestResult(
         document_id=body.document_id,
@@ -1051,9 +1142,86 @@ async def retrieve(
     tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
     try:
         sources = await retrieve_context(query[: settings.max_query_chars], tenant_id, settings, embedder, store)
-    except (httpx.HTTPError, RuntimeError) as error:
+    except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
     return {"data": sources}
+
+
+@app.post("/v1/evaluations/retrieval")
+async def evaluate_retrieval(
+    body: RetrievalEvaluationRequest,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    settings: Settings = Depends(get_settings),
+    store: AtlasStore = Depends(get_store),
+    embedder: VoyageEmbedder = Depends(get_embedder),
+) -> dict[str, Any]:
+    tenant_id = get_tenant_id(body.tenant_id, settings, allowed_tenants)
+    cases = []
+    cases_with_hits = 0
+    matched_relevant_documents = 0
+    expected_document_count = 0
+    reciprocal_rank_sum = 0.0
+    latency_sum = 0.0
+
+    for case in body.cases:
+        query = case.query.strip()
+        query = query[: settings.max_query_chars]
+        expected = set(case.expected_document_ids)
+        expected_document_count += len(expected)
+        started_at = asyncio.get_running_loop().time()
+        try:
+            vector = (await embedder.embed([query], input_type="query"))[0]
+            sources = await run_in_threadpool(store.search, tenant_id, vector, body.top_k)
+        except (httpx.HTTPError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Retrieval evaluation failed: {type(error).__name__}",
+            ) from error
+        latency_ms = (asyncio.get_running_loop().time() - started_at) * 1000
+        latency_sum += latency_ms
+        ranked_ids = [str(source["document_id"]) for source in sources]
+        relevant_ranks = [index for index, document_id in enumerate(ranked_ids, start=1) if document_id in expected]
+        matched_relevant_documents += len(set(ranked_ids) & expected)
+        reciprocal_rank = 1 / relevant_ranks[0] if relevant_ranks else 0.0
+        cases_with_hits += bool(relevant_ranks)
+        reciprocal_rank_sum += reciprocal_rank
+        cases.append(
+            {
+                "query": case.query,
+                "expected_document_ids": sorted(expected),
+                "retrieved_document_ids": ranked_ids,
+                "hit": bool(relevant_ranks),
+                "reciprocal_rank": reciprocal_rank,
+                "latency_ms": round(latency_ms, 2),
+                "sources": [
+                    {
+                        "document_id": source["document_id"],
+                        "chunk_index": source["chunk_index"],
+                        "score": source["score"],
+                        "metadata": source.get("metadata", {}),
+                    }
+                    for source in sources
+                ],
+            }
+        )
+
+    case_count = len(cases)
+    return {
+        "tenant_id": tenant_id,
+        "top_k": body.top_k,
+        "metrics": {
+            "case_count": case_count,
+            "hit_rate_at_k": cases_with_hits / case_count,
+            "recall_at_k": (
+                matched_relevant_documents / expected_document_count
+                if expected_document_count
+                else 0.0
+            ),
+            "mean_reciprocal_rank": reciprocal_rank_sum / case_count,
+            "mean_latency_ms": latency_sum / case_count,
+        },
+        "cases": cases,
+    }
 
 
 def _chat_payload(body: dict[str, Any], messages: list[dict[str, Any]], settings: Settings) -> dict[str, Any]:

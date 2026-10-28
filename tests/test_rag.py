@@ -1,5 +1,6 @@
 import json
 from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -448,6 +449,166 @@ def test_welcome_page_and_global_status(
         else:
             app.state.store = previous_store
         app.dependency_overrides.pop(get_settings, None)
+
+
+def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "tenant-evaluation-key"
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="evaluation-admin-key",
+        api_key_registry={sha256(token.encode()).hexdigest(): ["tenant-a"]},
+    )
+    searches: list[tuple[str, int]] = []
+
+    class FakeStore:
+        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+            searches.append((tenant_id, limit))
+            if vector == [1.0]:
+                return [
+                    {"document_id": "doc-a", "chunk_index": 0, "score": 0.9, "metadata": {}},
+                    {"document_id": "doc-c", "chunk_index": 2, "score": 0.8, "metadata": {}},
+                ]
+            return [
+                {"document_id": "doc-c", "chunk_index": 0, "score": 0.9, "metadata": {}},
+                {"document_id": "doc-b", "chunk_index": 1, "score": 0.8, "metadata": {}},
+            ]
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "query"
+            return [[1.0] if texts[0] == "first question" else [2.0]]
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(app) as client:
+            page = client.get("/tools/evaluation")
+            headers = {"Authorization": f"Bearer {token}"}
+            response = client.post(
+                "/v1/evaluations/retrieval",
+                headers=headers,
+                json={
+                    "tenant_id": "tenant-a",
+                    "top_k": 2,
+                    "cases": [
+                        {
+                            "query": "first question",
+                            "expected_document_ids": ["doc-a", "doc-b"],
+                        },
+                        {
+                            "query": "second question",
+                            "expected_document_ids": ["doc-b"],
+                        },
+                    ],
+                },
+            )
+            denied = client.post(
+                "/v1/evaluations/retrieval",
+                headers=headers,
+                json={
+                    "tenant_id": "tenant-b",
+                    "cases": [{"query": "question", "expected_document_ids": ["doc-a"]}],
+                },
+            )
+            admin_response = client.post(
+                "/v1/evaluations/retrieval",
+                headers={"Authorization": "Bearer evaluation-admin-key"},
+                json={
+                    "tenant_id": "tenant-b",
+                    "cases": [{"query": "first question", "expected_document_ids": ["doc-a"]}],
+                },
+            )
+
+        assert page.status_code == 200
+        assert "Retrieval evaluation" in page.text
+        assert response.status_code == 200
+        result = response.json()
+        assert result["metrics"]["case_count"] == 2
+        assert result["metrics"]["hit_rate_at_k"] == 1
+        assert result["metrics"]["recall_at_k"] == pytest.approx(2 / 3)
+        assert result["metrics"]["mean_reciprocal_rank"] == pytest.approx(0.75)
+        assert result["cases"][1]["retrieved_document_ids"] == ["doc-c", "doc-b"]
+        assert searches == [("tenant-a", 2), ("tenant-a", 2), ("tenant-b", 5)]
+        assert denied.status_code == 403
+        assert admin_response.status_code == 200
+        assert admin_response.json()["tenant_id"] == "tenant-b"
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_embedder, None)
+
+
+def test_retrieval_evaluation_accepts_shared_gateway_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, gateway_api_key="shared-evaluation-key")
+
+    class FakeStore:
+        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+            assert (tenant_id, vector, limit) == ("default", [0.1], 5)
+            return [{"document_id": "guide.md", "chunk_index": 0, "score": 0.9, "metadata": {}}]
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert texts == ["question"]
+            assert input_type == "query"
+            return [[0.1]]
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/evaluations/retrieval",
+                headers={"Authorization": "Bearer shared-evaluation-key"},
+                json={
+                    "cases": [
+                        {"query": "question", "expected_document_ids": ["guide.md"]},
+                    ],
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["metrics"]["hit_rate_at_k"] == 1
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_embedder, None)
+
+
+def test_evaluation_ui_sends_entered_token_as_bearer_credential() -> None:
+    page = (Path(main.__file__).parent / "static" / "evaluation.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"Authorization": ["Bearer", token].join(" ")' in page
+    assert '"Authorization": `******`' not in page
 
 
 def test_v1_root_and_ollama_tags_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

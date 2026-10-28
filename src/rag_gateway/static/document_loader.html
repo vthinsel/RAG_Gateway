@@ -57,6 +57,12 @@
     .file-picker label { display: inline-flex; gap: 6px; align-items: center; }
     .file-picker input { width: auto; min-height: 0; }
     #selected-files { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .preview-panel { margin: 12px 0; border-top: 1px solid var(--line); padding-top: 12px; }
+    .preview-panel pre {
+      max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+      background: #f4f8f4; border: 1px solid var(--line); border-radius: 4px; padding: 12px;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
     button {
       min-height: 40px; border: 1px solid var(--green); border-radius: 4px;
       background: var(--green); color: white; padding: 8px 14px; font: inherit; font-weight: 650;
@@ -113,6 +119,15 @@
               Drop files or folders here, or click to choose files
             </div>
             <div id="selected-files" aria-live="polite">No files selected</div>
+            <div class="preview-panel">
+              <div class="field">
+                <label for="preview-file">Preview extracted text before upload</label>
+                <select id="preview-file" disabled><option value="">Choose a selected file</option></select>
+              </div>
+              <button type="button" class="secondary" id="preview-document" disabled>Preview document</button>
+              <p id="preview-summary" class="note" role="status" aria-live="polite"></p>
+              <pre id="preview-text" hidden></pre>
+            </div>
           </div>
           <div class="two">
             <div class="field">
@@ -173,6 +188,10 @@
     const message = document.querySelector("#message");
     const eventsList = document.querySelector("#events");
     const selectedFilesLabel = document.querySelector("#selected-files");
+    const previewFileSelect = document.querySelector("#preview-file");
+    const previewButton = document.querySelector("#preview-document");
+    const previewSummary = document.querySelector("#preview-summary");
+    const previewText = document.querySelector("#preview-text");
     let selectedUploads = [];
     let activeJob = null;
 
@@ -186,6 +205,17 @@
       selectedFilesLabel.textContent = files.length
         ? `${files.length} file(s), ${(totalBytes / (1024 * 1024)).toFixed(1)} MiB selected: ${files.slice(0, 8).map(item => item.path).join(", ")}${files.length > 8 ? ", ..." : ""}`
         : "No files selected";
+      previewFileSelect.replaceChildren();
+      if (!files.length) {
+        previewFileSelect.add(new Option("Choose a selected file", ""));
+      } else {
+        files.forEach((item, index) => previewFileSelect.add(new Option(item.path, String(index))));
+      }
+      previewFileSelect.disabled = !files.length;
+      previewButton.disabled = !files.length;
+      previewSummary.textContent = "";
+      previewText.textContent = "";
+      previewText.hidden = true;
     }
 
     document.querySelector("#file-picker").addEventListener("change", event => {
@@ -296,6 +326,31 @@
       } catch (error) {
         message.style.color = "#a63d35";
         message.textContent = error.message;
+      }
+    });
+
+    previewButton.addEventListener("click", async () => {
+      const selectedIndex = Number(previewFileSelect.value);
+      const selected = selectedUploads[selectedIndex];
+      if (!selected) {
+        previewSummary.textContent = "Choose a selected file to preview.";
+        return;
+      }
+      previewButton.disabled = true;
+      previewSummary.textContent = `Extracting text from ${selected.path}...`;
+      previewText.hidden = true;
+      try {
+        const body = new FormData();
+        body.append("file", selected.file, selected.path);
+        body.append("model", modelSelect.value || "");
+        const data = await api("/v1/document-loader/preview", { method: "POST", body });
+        previewSummary.textContent = `${data.filename} · ${data.extension} · ${data.characters.toLocaleString()} characters. Preview is not ingested.`;
+        previewText.textContent = data.text;
+        previewText.hidden = false;
+      } catch (error) {
+        previewSummary.textContent = error.message;
+      } finally {
+        previewButton.disabled = !selectedUploads.length;
       }
     });
 

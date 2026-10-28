@@ -95,6 +95,66 @@ def test_document_loader_ui_requires_opt_in(monkeypatch: pytest.MonkeyPatch) -> 
     assert "/v1/document-loader/jobs" in response.text
 
 
+def test_document_preview_extracts_without_ingestion(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="test-key",
+        document_loader_enabled=True,
+    )
+    model_checks = 0
+
+    class FakeParser:
+        def __init__(self, _url: str, model: str, *_args: Any) -> None:
+            self.model = model
+
+        def list_models(self) -> list[str]:
+            nonlocal model_checks
+            model_checks += 1
+            return ["glm-ocr:latest"]
+
+        def extract(self, path: Path) -> str:
+            return path.read_text(encoding="utf-8")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    try:
+        with TestClient(main.app) as client:
+            page = client.get("/tools/document-loader")
+            denied = client.post(
+                "/v1/document-loader/preview",
+                files={"file": ("notes.txt", b"Preview this text")},
+            )
+            preview = client.post(
+                "/v1/document-loader/preview",
+                headers={"Authorization": "Bearer test-key"},
+                files={"file": ("notes.txt", b"Preview this text")},
+            )
+            unsupported = client.post(
+                "/v1/document-loader/preview",
+                headers={"Authorization": "Bearer test-key"},
+                files={"file": ("notes.exe", b"not supported")},
+            )
+
+        assert page.status_code == 200
+        assert "Preview extracted text before upload" in page.text
+        assert denied.status_code == 401
+        assert preview.status_code == 200
+        assert preview.json() == {
+            "filename": "notes.txt",
+            "extension": ".txt",
+            "characters": len("Preview this text"),
+            "text": "Preview this text",
+        }
+        assert unsupported.status_code == 415
+        assert model_checks == 1
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+
+
 def test_gateway_admin_key_and_registered_keys_can_access_loader_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
