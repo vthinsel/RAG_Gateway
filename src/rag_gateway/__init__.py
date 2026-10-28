@@ -1,1 +1,1 @@
-"""Local-first RAG gateway backed by MongoDB Atlas and Voyage AI."""
+"""Local-first RAG gateway backed by MongoDB Atlas and its AI Models API."""

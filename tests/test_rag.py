@@ -9,10 +9,25 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 
 from rag_gateway.chunking import chunk_text
+from rag_gateway.config import Settings
 from rag_gateway.main import _stream_completion, app, get_tenant_id, require_api_key
 from rag_gateway.rag import add_rag_system_message, extract_user_query
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder, _token_batches
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("ai.mongodb.com", "https://ai.mongodb.com/v1"),
+        ("https://models.example.test", "https://models.example.test/v1"),
+        ("https://models.example.test/v1/", "https://models.example.test/v1"),
+    ],
+)
+def test_mongodb_api_model_endpoint_normalizes_to_v1(endpoint: str, expected: str) -> None:
+    settings = Settings(_env_file=None, mongodb_api_model_endpoint=endpoint)
+
+    assert settings.mongodb_api_model_base_url == expected
 
 
 def test_chunk_text_respects_size_and_overlap() -> None:
@@ -89,10 +104,12 @@ def test_api_key_registry_restricts_tenants() -> None:
 
 async def test_voyage_embed_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
+    captured_requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        captured_requests.append(request)
         if calls == 1:
             return httpx.Response(429, headers={"Retry-After": "0"})
         return httpx.Response(
@@ -105,7 +122,8 @@ async def test_voyage_embed_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("rag_gateway.voyage.asyncio.sleep", no_wait)
     settings = SimpleNamespace(
-        voyage_api_key="test-key",
+        mongodb_api_key="test-key",
+        mongodb_api_model_base_url="https://models.example.test/v1",
         voyage_embedding_model="test-model",
         embedding_dimensions=2,
         embedding_batch_size=64,
@@ -115,6 +133,8 @@ async def test_voyage_embed_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) 
 
     assert vectors == [[0.1, 0.2]]
     assert calls == 2
+    assert captured_requests[-1].url == "https://models.example.test/v1/embeddings"
+    assert captured_requests[-1].headers["Authorization"] == "Bearer test-key"
 
 
 def test_add_rag_message_preserves_history_and_labels_sources() -> None:

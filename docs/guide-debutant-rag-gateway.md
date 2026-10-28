@@ -15,13 +15,13 @@ Le RAG, pour *Retrieval-Augmented Generation*, ajoute une étape de recherche av
 3. Ajouter ces passages à la conversation comme éléments de preuve.
 4. Demander au modèle de répondre à partir de ces éléments, et de signaler si les preuves manquent.
 
-La gateway orchestre cette séquence. Le modèle local génère la réponse ; MongoDB Atlas retrouve les passages ; Voyage AI transforme les textes en vecteurs de recherche.
+La gateway orchestre cette séquence. Le modèle local génère la réponse ; MongoDB Atlas retrouve les passages ; l'API AI Models de MongoDB transforme les textes en vecteurs de recherche.
 
 ### Embedding : représenter le sens par un vecteur
 
 Un embedding est une liste de nombres calculée à partir d'un texte. Des textes dont le sens est proche ont tendance à produire des vecteurs proches. On peut alors chercher des passages liés à une question, même si les mots ne sont pas exactement les mêmes.
 
-Dans cette application, Voyage AI produit par défaut des vecteurs de 1024 dimensions avec `voyage-3.5`. Le même modèle sert pour les documents et les questions, avec des modes distincts (`document` et `query`). Le nombre de dimensions du modèle, la configuration `EMBEDDING_DIMENSIONS` et l'index Atlas doivent correspondre.
+Par défaut, cette application demande le modèle d'embedding `voyage-3.5` via l'API AI Models de MongoDB pour produire des vecteurs de 1024 dimensions. Le même modèle sert pour les documents et les questions, avec des modes distincts (`document` et `query`). Le nombre de dimensions du modèle, la configuration `EMBEDDING_DIMENSIONS` et l'index Atlas doivent correspondre.
 
 La recherche est une proximité vectorielle avec similarité cosinus. Atlas renvoie un score ; l'application écarte les résultats en dessous de `RETRIEVAL_MIN_SCORE`, qui vaut `0.72` par défaut. Ce seuil est un point de départ à mesurer sur vos propres questions, pas une garantie universelle de pertinence.
 
@@ -41,7 +41,7 @@ Le reranking peut améliorer les premiers résultats, mais ajoute généralement
 
 ## 2. Vue d'ensemble
 
-Le système comporte une partie locale et des services cloud. Les textes envoyés à Voyage pour créer les embeddings et les chunks/vecteurs stockés dans Atlas quittent donc l'environnement local. La génération de la réponse reste sur le service Ollama configuré.
+Le système comporte une partie locale et des services cloud. Les textes envoyés au point d'accès du modèle AI MongoDB pour créer les embeddings et les chunks/vecteurs stockés dans Atlas quittent donc l'environnement local. La génération de la réponse reste sur le service Ollama configuré.
 
 ```mermaid
 flowchart LR
@@ -60,7 +60,7 @@ flowchart LR
     end
 
     subgraph Cloud["Services cloud"]
-        Voyage["Voyage AI : embeddings"]
+        Voyage["API AI Models MongoDB : embeddings"]
         Atlas["MongoDB Atlas : chunks et recherche vectorielle"]
     end
 
@@ -78,7 +78,7 @@ Le code applicatif se trouve dans `src/rag_gateway/`. Chaque module a une respon
 | [config.py](../src/rag_gateway/config.py) | Lit les paramètres d'environnement et vérifie certaines valeurs, comme la taille et le chevauchement des chunks. |
 | [models.py](../src/rag_gateway/models.py) | Définit les données attendues par l'API d'ingestion et sa réponse. |
 | [chunking.py](../src/rag_gateway/chunking.py) | Découpe le texte en chunks avec chevauchement. |
-| [voyage.py](../src/rag_gateway/voyage.py) | Appelle l'API Voyage pour les embeddings, groupe les textes en lots et réessaie certaines erreurs temporaires. |
+| [voyage.py](../src/rag_gateway/voyage.py) | Appelle le point d'accès du modèle AI MongoDB configuré, groupe les textes en lots et réessaie certaines erreurs temporaires. |
 | [store.py](../src/rag_gateway/store.py) | Écrit, remplace, supprime et recherche les chunks dans MongoDB Atlas. |
 | [rag.py](../src/rag_gateway/rag.py) | Construit l'embedding de question, assemble les sources dans le prompt et extrait la requête depuis l'historique de chat. |
 | [document_loader.py](../src/rag_gateway/document_loader.py) | Parcourt des dossiers, extrait plusieurs formats, appelle le modèle OCR Ollama configuré pour les pages/images et transmet la progression. |
@@ -107,7 +107,7 @@ L'ingestion prépare les données pour les futures recherches. Elle ne demande p
 1. `scripts/ingest_folder.py` parcourt récursivement le dossier et sélectionne les fichiers `.txt` et `.md` encodés en UTF-8.
 2. Pour chaque fichier, le script envoie son texte, son chemin relatif comme `document_id`, un `tenant_id` et des métadonnées à `POST /v1/ingest`.
 3. FastAPI valide le corps de la requête, vérifie la limite `MAX_DOCUMENT_CHARS`, puis demande au module de chunking de découper le texte.
-4. `VoyageEmbedder` envoie les chunks à Voyage avec `input_type=document`. Les requêtes sont limitées par `EMBEDDING_BATCH_SIZE` et un budget de tokens estimé ; les erreurs temporaires sélectionnées font l'objet de tentatives avec délai progressif.
+4. `VoyageEmbedder` envoie les chunks au point d'accès du modèle AI MongoDB configuré avec `input_type=document`. Les requêtes sont limitées par `EMBEDDING_BATCH_SIZE` et un budget de tokens estimé ; les erreurs temporaires sélectionnées font l'objet de tentatives avec délai progressif.
 5. `AtlasStore` enregistre chaque chunk avec son vecteur, son tenant, son document, son numéro d'ordre, ses métadonnées, le modèle et la dimension d'embedding, la politique de chunking et un hash SHA-256 du texte.
 
 ```mermaid
@@ -117,7 +117,7 @@ sequenceDiagram
     participant Script as ingest_folder.py
     participant API as FastAPI / Gateway
     participant Chunker as chunking.py
-    participant Voyage as Voyage AI
+    participant Voyage as API AI Models MongoDB
     participant Store as AtlasStore
     participant Atlas as MongoDB Atlas
 
@@ -182,7 +182,7 @@ Un utilisateur écrit dans Open WebUI ou envoie une demande depuis Hermes. Ces a
 
 1. Le client envoie une requête OpenAI-compatible à `POST /v1/chat/completions`, avec `messages`, un bearer token et éventuellement `X-Tenant-ID`.
 2. La gateway extrait les trois derniers messages utilisateur non vides et les combine pour fournir un peu de contexte aux questions de suivi, par exemple « et pour les sauvegardes ? ».
-3. La question combinée est envoyée à Voyage avec `input_type=query` pour obtenir un vecteur.
+3. La question combinée est envoyée au point d'accès du modèle AI MongoDB configuré avec `input_type=query` pour obtenir un vecteur.
 4. Atlas recherche les chunks les plus proches dans le tenant autorisé. Le pipeline applique `RETRIEVAL_TOP_K`, puis garde les résultats dont le score est supérieur ou égal à `RETRIEVAL_MIN_SCORE`.
 5. La gateway ajoute les extraits trouvés à un message système. Les sources sont identifiées `[S1]`, `[S2]`, etc. Les textes des documents sont des données non fiables : certains marqueurs de prompt et de citation sont neutralisés, et le bloc d'évidence utilise un délimiteur aléatoire.
 6. La requête enrichie est envoyée à l'API de chat locale d'Ollama.
@@ -194,7 +194,7 @@ sequenceDiagram
     actor Personne
     participant Client as Open WebUI / Hermes / autre client
     participant GW as Atlas RAG Gateway
-    participant Voyage as Voyage AI
+    participant Voyage as API AI Models MongoDB
     participant Atlas as MongoDB Atlas
     participant Ollama as Ollama local
 
@@ -215,17 +215,54 @@ sequenceDiagram
 
 Quand aucune source ne dépasse le seuil, la gateway indique au modèle qu'aucune preuve pertinente n'a été retrouvée et lui demande de ne pas inventer de faits sourcés. Ce mécanisme réduit le risque d'hallucination, mais ne garantit pas à lui seul la justesse de chaque réponse.
 
-## 6. Utiliser Hermes, Open WebUI ou un autre client
+## 6. Configurer Open WebUI et Hermes
 
-Le client doit pouvoir appeler une API de chat compatible avec le format OpenAI. Il ne lui faut pas de code RAG spécifique : il envoie la conversation à la gateway, qui effectue le retrieval et appelle Ollama.
+Les deux clients doivent se connecter à la **gateway RAG**, et non directement à Ollama ou à l'API AI Models de MongoDB. La gateway recherche le contexte filtré par tenant dans Atlas, l'ajoute à la conversation, puis appelle Ollama.
 
-- URL de base lorsque le client tourne sur le même poste : `http://localhost:8000/v1`.
-- Depuis un conteneur Docker, une adresse comme `http://host.docker.internal:8000/v1` peut être nécessaire ; le routage dépend du réseau Docker et de l'adresse d'écoute de la gateway.
-- Identifiant de modèle à sélectionner : `rag-local` par défaut. L'application transmet ensuite le nom configuré dans `OLLAMA_MODEL` à Ollama.
-- Authentification : bearer token partagé ou clé enregistrée dans `API_KEY_REGISTRY`.
-- Tenant : `X-Tenant-ID` pour les recherches, conversations et suppressions ; le corps de l'ingestion contient `tenant_id`.
+### Avant la connexion
 
-Les noms exacts des champs de configuration varient selon les versions d'Hermes et d'Open WebUI. Si un client ne sait pas ajouter `X-Tenant-ID`, il faut configurer son mécanisme de headers personnalisés ou appeler l'API via son outil HTTP. En mode registre, la clé n'autorise que les tenants explicitement associés à son hash.
+1. Démarrez la gateway et vérifiez qu'elle est prête avec `GET /readyz`.
+2. Ingérez quelques documents de test avec le tenant souhaité. L'ingestion reçoit `tenant_id` dans le corps ; le chat sélectionne le même tenant avec `X-Tenant-ID`.
+3. Vérifiez que la clé API est acceptée :
+
+   ```bash
+   curl -H "Authorization: Bearer VOTRE_CLE_GATEWAY" \
+     http://127.0.0.1:8000/v1/models
+   ```
+
+4. Choisissez l'URL de gateway accessible depuis le client :
+   - Client sur le même hôte : `http://localhost:8000/v1`
+   - Open WebUI dans Docker et gateway sur l'hôte : `http://host.docker.internal:8000/v1` (le conteneur doit pouvoir résoudre et joindre l'hôte)
+   - Les deux dans Docker sur le même réseau : utilisez le nom du service gateway, par exemple `http://rag-gateway:8000/v1`
+
+Le client doit utiliser la clé bearer brute de la gateway. N'utilisez pas `MONGODB_API_KEY` ici : cette clé sert uniquement aux requêtes d'embedding de la gateway. Si `API_KEY_REGISTRY` n'est pas vide, choisissez une clé brute enregistrée et autorisée pour le tenant.
+
+### Open WebUI
+
+1. Ouvrez **Admin Panel → Settings → Connections** et ajoutez une connexion **OpenAI-compatible** (les libellés peuvent varier selon la version).
+2. Renseignez l'**API Base URL** avec l'URL de la gateway, suffixe `/v1` inclus.
+3. Renseignez l'**API key** avec la valeur brute de `GATEWAY_API_KEY`, ou avec la clé brute enregistrée si `API_KEY_REGISTRY` est utilisé. Ne préfixez pas la clé par `Bearer`.
+4. Enregistrez la connexion, actualisez ou récupérez la liste des modèles, puis sélectionnez **`rag-local`**. C'est l'identifiant public de la gateway ; celle-ci transmet ensuite la génération à `OLLAMA_MODEL`.
+5. Pour un tenant autre que celui par défaut, configurez l'envoi de `X-Tenant-ID: votre-tenant`. Si votre version d'Open WebUI ne permet pas de définir des headers personnalisés pour cette connexion, utilisez `DEFAULT_TENANT_ID` pour cette connexion ou un autre client permettant de définir ce header.
+6. Posez une question dont la réponse se trouve dans les documents ingérés. Vérifiez les citations comme `[S1]`. Si le contexte attendu n'est pas utilisé, testez la même requête avec `curl` pour distinguer un problème client d'un problème de retrieval.
+
+### Hermes
+
+1. Ajoutez un fournisseur/modèle qui prend en charge une **URL de base d'API personnalisée compatible OpenAI**.
+2. Configurez l'URL de base avec l'URL de gateway ci-dessus, suffixe `/v1` inclus, puis utilisez la clé brute partagée ou enregistrée de la gateway (sans préfixe `Bearer `).
+3. Choisissez l'identifiant de modèle **`rag-local`**. Ne configurez pas Hermes pour appeler le modèle d'embedding : la gateway s'occupe des embeddings et de la recherche Atlas.
+4. Si le fournisseur permet des headers personnalisés, ajoutez `X-Tenant-ID: votre-tenant` pour un tenant non défini par défaut. Avec `API_KEY_REGISTRY`, la clé choisie doit être autorisée pour ce tenant.
+5. Si votre version de Hermes ou son fournisseur ne permet pas d'utiliser une URL OpenAI-compatible personnalisée, appelez `POST /v1/chat/completions` via son outil HTTP/API. Envoyez la clé dans `Authorization: Bearer ...`, le tenant dans `X-Tenant-ID` et un corps compatible OpenAI, par exemple :
+
+   ```json
+   {
+     "model": "rag-local",
+     "messages": [{"role": "user", "content": "Que dit le guide sur les congés ?"}],
+     "stream": false
+   }
+   ```
+
+Conservez la clé gateway dans le gestionnaire de secrets ou l'environnement du client, jamais dans les prompts, une configuration partagée ou le dépôt Git. En streaming, les métadonnées de source sont envoyées dans un événement SSE initial avec l'extension non standard `sources` ; le client peut afficher la réponse sans présenter ces métadonnées.
 
 ## 7. Configuration et limites à connaître
 
@@ -235,15 +272,18 @@ Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs
 | --- | --- |
 | `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION` | Connexion et emplacement des chunks dans Atlas. |
 | `MONGODB_API_MODEL_ENDPOINT` | Nom d'hôte du service API Model de MongoDB ; valeur par défaut : `ai.mongodb.com`. |
+| `MONGODB_API_KEY` | Requise pour les requêtes d'embedding ; elle sert aussi à la vérification du modèle au démarrage. |
 | `ATLAS_VECTOR_INDEX` | Nom de l'index Vector Search déjà créé dans Atlas. |
-| `VOYAGE_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Service et format des embeddings. |
+| `MONGODB_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Service MongoDB AI pour les embeddings et format des vecteurs. |
 | `GATEWAY_API_KEY` ou `API_KEY_REGISTRY` | Authentification partagée ou autorisations statiques clé-vers-tenant. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Adresse et modèle de génération local. Compose remplace `OLLAMA_BASE_URL` dans le conteneur pour joindre l'hôte. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Découpage caractère des documents. |
-| `EMBEDDING_BATCH_SIZE` | Nombre maximal de textes par requête Voyage, avec budget de tokens estimé en plus. |
+| `EMBEDDING_BATCH_SIZE` | Nombre maximal de textes par requête au modèle AI MongoDB, avec budget de tokens estimé en plus. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Nombre maximal de résultats et score minimal accepté. |
 
-Les embeddings et le stockage sont des services cloud dans cette architecture : le texte source et les questions partent vers Voyage, et les chunks ainsi que leurs vecteurs résident dans Atlas. Vérifiez la classification des données et les règles de votre organisation avant d'utiliser des documents réels.
+Les embeddings et le stockage sont des services cloud dans cette architecture : le texte source et les questions partent vers le point d'accès du modèle AI MongoDB configuré, et les chunks ainsi que leurs vecteurs résident dans Atlas. Vérifiez la classification des données et les règles de votre organisation avant d'utiliser des documents réels.
+
+Au démarrage, la gateway journalise les modèles Ollama détectés et envoie un ping à Atlas sans exposer les identifiants de l'URI. Si `MONGODB_API_KEY` est configurée, elle envoie également une petite requête d'embedding au point d'accès MongoDB AI, susceptible de compter dans l'utilisation de l'API ; sinon, cette vérification est journalisée comme ignorée. L'ingestion des documents et l'embedding des requêtes utilisent le même point d'accès et la même clé.
 
 L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. Elle n'intègre pas non plus de reranker, de recherche hybride, de jeu d'évaluation, de métriques Prometheus ou de filtrage ACL au niveau document. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
 
@@ -255,7 +295,7 @@ Après avoir installé les dépendances et configuré `.env`, on peut démarrer 
 python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
-Avant la première recherche, il faut que MongoDB Atlas soit accessible, que l'index Vector Search configuré soit à l'état `READY`, que la clé Voyage soit configurée, et qu'Ollama serve le modèle de chat choisi. Pour les instructions d'installation par plateforme, voir le [README du projet](../README.md).
+Avant la première recherche, il faut que MongoDB Atlas soit accessible, que l'index Vector Search configuré soit à l'état `READY`, que `MONGODB_API_KEY` soit configurée et qu'Ollama serve le modèle de chat choisi. Pour les instructions d'installation par plateforme, voir le [README du projet](../README.md).
 
 Les tests automatisés du dépôt se lancent avec :
 

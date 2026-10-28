@@ -8,6 +8,7 @@ from hashlib import sha256
 from hmac import compare_digest
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -34,7 +35,75 @@ from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder
 
 bearer_scheme = HTTPBearer(auto_error=False)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(logging.INFO)
+
+
+def _host_label(url: str) -> str:
+    parsed = urlsplit(url if "://" in url else f"https://{url}")
+    return parsed.hostname or "unknown host"
+
+
+def _mongodb_host_label(uri: str) -> str:
+    return urlsplit(uri).hostname or "configured MongoDB URI"
+
+
+async def _check_mongodb_ai_model_api(settings: Settings, client: httpx.AsyncClient) -> None:
+    api_base = settings.mongodb_api_model_base_url
+    model = settings.voyage_embedding_model
+    host = _host_label(settings.mongodb_api_model_endpoint)
+    if not settings.mongodb_api_key:
+        logger.info(
+            "MongoDB AI API model check skipped: endpoint=%s model=%s; "
+            "MONGODB_API_KEY is not configured",
+            host,
+            model,
+        )
+        return
+
+    logger.info("Checking MongoDB AI API model: endpoint=%s model=%s", host, model)
+    try:
+        response = await client.post(
+            f"{api_base}/embeddings",
+            headers={"Authorization": "Bearer " + settings.mongodb_api_key},
+            json={"model": model, "input": ["MongoDB AI API startup connectivity check"]},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != 1:
+            raise ValueError("unexpected embeddings response shape")
+        embedding = data[0].get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            raise ValueError("response did not contain a non-empty embedding")
+    except httpx.HTTPStatusError as error:
+        logger.warning(
+            "MongoDB AI API model check failed: endpoint=%s model=%s status=%s",
+            host,
+            model,
+            error.response.status_code,
+        )
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError) as error:
+        logger.warning(
+            "MongoDB AI API model check failed: endpoint=%s model=%s error=%s",
+            host,
+            model,
+            type(error).__name__,
+        )
+    else:
+        actual_dimensions = len(embedding)
+        if actual_dimensions != settings.embedding_dimensions:
+            logger.warning(
+                "MongoDB AI API model responded but returned %s dimensions; "
+                "EMBEDDING_DIMENSIONS is configured as %s",
+                actual_dimensions,
+                settings.embedding_dimensions,
+            )
+        logger.info(
+            "MongoDB AI API model check succeeded: model=%s dimensions=%s",
+            model,
+            actual_dimensions,
+        )
 
 
 @asynccontextmanager
@@ -44,12 +113,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.store = None
     app.state.document_loader_jobs = {}
     app.state.document_loader_tasks = set()
+    atlas_error: PyMongoError | None = None
     if settings.mongodb_uri:
+        logger.info(
+            "Starting MongoDB Atlas connection check: host=%s database=%s collection=%s",
+            _mongodb_host_label(settings.mongodb_uri),
+            settings.mongodb_database,
+            settings.mongodb_collection,
+        )
         try:
             app.state.store = await run_in_threadpool(AtlasStore, settings)
+            logger.info("MongoDB Atlas client initialized; sending ping")
             await run_in_threadpool(app.state.store.ping)
             logger.info(
-                "Connected to MongoDB Atlas database=%s collection=%s",
+                "MongoDB Atlas connection check succeeded: host=%s database=%s collection=%s",
+                _mongodb_host_label(settings.mongodb_uri),
                 settings.mongodb_database,
                 settings.mongodb_collection,
             )
@@ -59,29 +137,55 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if app.state.store is not None:
                 await run_in_threadpool(app.state.store.close)
                 app.state.store = None
-            await app.state.http.aclose()
-            raise
+            atlas_error = error
     else:
-        logger.info("MongoDB Atlas is not configured")
+        logger.warning("MongoDB Atlas connection check skipped: MONGODB_URI is not configured")
 
-    if settings.document_loader_enabled:
-        parser = OllamaDocumentParser(
-            settings.ollama_base_url,
-            settings.document_parser_model,
-            settings.document_parser_timeout_seconds,
+    await _check_mongodb_ai_model_api(settings, app.state.http)
+
+    parser = OllamaDocumentParser(
+        settings.ollama_base_url,
+        settings.ollama_model,
+        settings.document_parser_timeout_seconds,
+    )
+    logger.info(
+        "Checking Ollama model service: endpoint=%s chat_model=%s document_loader=%s",
+        _host_label(settings.ollama_base_url),
+        settings.ollama_model,
+        "enabled" if settings.document_loader_enabled else "disabled",
+    )
+    try:
+        models = await asyncio.to_thread(parser.list_models)
+        logger.info(
+            "Ollama connection check succeeded; discovered models: %s",
+            ", ".join(models) if models else "(none)",
         )
-        try:
-            models = await asyncio.to_thread(parser.list_models)
-            logger.info("Ollama discovered models: %s", ", ".join(models) if models else "(none)")
-            if not any(model.casefold() == parser.model.casefold() for model in models):
-                logger.warning(
-                    "Configured document parser model %r is not present in the Ollama model list",
-                    parser.model,
-                )
-        except httpx.HTTPError as error:
-            logger.warning("Ollama model discovery failed (%s): %s", type(error).__name__, error)
-        finally:
-            parser.close()
+        if not models:
+            logger.warning("Ollama responded successfully but has no models installed")
+        if not any(model.casefold() == settings.ollama_model.casefold() for model in models):
+            logger.warning("Configured Ollama chat model %r is not installed", settings.ollama_model)
+        else:
+            logger.info("Configured Ollama chat model %r is installed", settings.ollama_model)
+        if settings.document_loader_enabled and not any(
+            model.casefold() == settings.document_parser_model.casefold() for model in models
+        ):
+            logger.warning(
+                "Configured document parser model %r is not installed in Ollama",
+                settings.document_parser_model,
+            )
+        elif settings.document_loader_enabled:
+            logger.info("Configured Ollama document parser model %r is installed", settings.document_parser_model)
+    except (httpx.HTTPError, ValueError) as error:
+        logger.warning(
+            "Ollama model discovery failed: endpoint=%s error=%s",
+            _host_label(settings.ollama_base_url),
+            type(error).__name__,
+        )
+    finally:
+        parser.close()
+    if atlas_error is not None:
+        await app.state.http.aclose()
+        raise atlas_error
     yield
     if app.state.store is not None:
         await run_in_threadpool(app.state.store.close)
@@ -181,8 +285,8 @@ async def readiness(request: Request) -> JSONResponse:
         missing_configuration.append("MONGODB_URI")
     if not (settings.gateway_api_key or settings.api_key_registry):
         missing_configuration.append("GATEWAY_API_KEY or API_KEY_REGISTRY")
-    if not settings.voyage_api_key:
-        missing_configuration.append("VOYAGE_API_KEY")
+    if not settings.mongodb_api_key:
+        missing_configuration.append("MONGODB_API_KEY")
     if missing_configuration:
         logger.warning("Readiness check missing configuration: %s", ", ".join(missing_configuration))
         return JSONResponse(status_code=503, content={"status": "not_ready"})

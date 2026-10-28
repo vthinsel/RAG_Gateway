@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     api_key_registry: dict[str, list[str]] = Field(default_factory=dict)
     mongodb_uri: str = ""
     mongodb_api_model_endpoint: str = "ai.mongodb.com"
+    mongodb_api_key: str = ""
     mongodb_database: str = "rag_gateway"
     mongodb_collection: str = "chunks"
     atlas_vector_index: str = "rag_chunks_vector"
-    voyage_api_key: str = ""
     voyage_embedding_model: str = "voyage-3.5"
     embedding_dimensions: int = Field(default=1024, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1, le=128)
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     document_loader_max_active_jobs: int = Field(default=2, ge=1, le=8)
     document_parser_model: str = "glm-ocr:latest"
     document_parser_timeout_seconds: float = Field(default=300.0, gt=0)
+
+    @property
+    def mongodb_api_model_base_url(self) -> str:
+        endpoint = self.mongodb_api_model_endpoint.strip().rstrip("/")
+        if "://" not in endpoint:
+            endpoint = f"https://{endpoint}"
+        return endpoint if endpoint.endswith("/v1") else f"{endpoint}/v1"
 
     @model_validator(mode="after")
     def validate_chunk_overlap(self) -> "Settings":

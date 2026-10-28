@@ -36,8 +36,8 @@ class VoyageEmbedder:
     async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
         if not texts:
             return []
-        if not self.settings.voyage_api_key:
-            raise RuntimeError("VOYAGE_API_KEY is not configured")
+        if not self.settings.mongodb_api_key:
+            raise RuntimeError("MONGODB_API_KEY is not configured")
 
         vectors: list[list[float]] = []
         batches = _token_batches(texts, max_items=self.settings.embedding_batch_size)
@@ -54,10 +54,10 @@ class VoyageEmbedder:
             data = sorted(payload["data"], key=lambda item: item["index"])
             batch_vectors = [item["embedding"] for item in data]
             if len(batch_vectors) != len(batch):
-                raise RuntimeError("Voyage returned a different number of embeddings than inputs")
+                raise RuntimeError("Embedding API returned a different number of vectors than inputs")
             if any(len(vector) != self.settings.embedding_dimensions for vector in batch_vectors):
                 raise RuntimeError(
-                    "Voyage embedding dimensions do not match EMBEDDING_DIMENSIONS; "
+                    "Embedding dimensions do not match EMBEDDING_DIMENSIONS; "
                     "align the model and Atlas Vector Search index"
                 )
             vectors.extend(batch_vectors)
@@ -67,8 +67,8 @@ class VoyageEmbedder:
         for attempt in range(attempts):
             try:
                 response = await self.client.post(
-                    "https://api.voyageai.com/v1/embeddings",
-                    headers={"Authorization": f"Bearer {self.settings.voyage_api_key}"},
+                    f"{self.settings.mongodb_api_model_base_url}/embeddings",
+                    headers={"Authorization": "Bearer " + self.settings.mongodb_api_key},
                     json=payload,
                 )
             except httpx.TransportError:

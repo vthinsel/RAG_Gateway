@@ -1,8 +1,8 @@
 # Atlas RAG Gateway
 
-A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with Voyage AI, retrieves matching chunks from MongoDB Atlas Vector Search, and sends the augmented conversation to a model served by local Ollama.
+A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with the configured model through MongoDB's AI Models API, retrieves matching chunks from MongoDB Atlas Vector Search, and sends the augmented conversation to a model served by local Ollama.
 
-> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to Voyage AI for embedding; chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, Voyage AI terms, Atlas region, retention, and network policy before ingesting real data.
+> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
 
 ## Architecture
 
@@ -18,27 +18,27 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 | Component | Role | Where it runs |
 | --- | --- | --- |
 | Python 3.11+ / FastAPI | Ingestion, retrieval, OpenAI-compatible chat endpoint | Your workstation or on-prem host |
-| Voyage AI embeddings API | Shared embedding model for documents and queries | Voyage AI cloud API |
+| MongoDB AI Models API | Shared embedding model for documents and queries | MongoDB AI model endpoint |
 | MongoDB Atlas Vector Search | Chunks, metadata, vectors, filtered nearest-neighbor search | MongoDB Atlas |
 | Ollama | Local chat completion model | Already-running local/on-prem service |
 | Open WebUI / Hermes | User and agent clients | Your local environment |
 
-The default embedding model is `voyage-3.5`, with 1024 dimensions. Verify current model availability and dimensions in your Voyage account before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
+The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. Voyage embedding requests use item and estimated-token batching with retries for transient errors. Scheduled sync, document ACL filtering, reranking, and a labeled evaluation harness remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, document ACL filtering, reranking, and a labeled evaluation harness remain later phases.
 
 ## Build Plan
 
-1. **Agree on the data boundary.** Identify allowed source folders and data classifications. Decide whether Voyage AI may receive source text and questions, which Atlas region is acceptable, and who can call the gateway. If policy requires all text to stay on-prem, replace Voyage embeddings before ingesting anything; Atlas and Voyage are cloud services in this design.
+1. **Agree on the data boundary.** Identify allowed source folders and data classifications. Decide whether MongoDB AI models may receive source text and questions, which Atlas region is acceptable, and who can call the gateway. If policy requires all text to stay on-prem, replace the hosted embedding service before ingesting anything; Atlas and its AI model endpoint are cloud services in this design.
 2. **Prepare Atlas.** Create or select a cluster in the intended region. Create a database user scoped to read/write on the gateway database, allow only the gateway's egress IP in Atlas Network Access, and use the Atlas-provided SRV connection string. Avoid broad `0.0.0.0/0` access for normal use.
-3. **Prepare Voyage AI.** Create an API key with the least available scope. Set the model and its output dimension in `.env`. Embedding model changes require re-embedding documents and recreating or migrating the vector index.
+3. **Prepare the MongoDB AI Models API.** Configure its API key and endpoint in `.env`. Set the model and its output dimension. Embedding model changes require re-embedding documents and recreating or migrating the vector index.
 4. **Run the local service.** Configure `.env`, install the project in the Miniconda environment, check that Ollama serves the chosen model, then start FastAPI. Docker is optional packaging.
 5. **Create the Atlas vector index.** In Atlas Data Explorer, open the configured database and collection, create a Vector Search index named `rag_chunks_vector`, and use the JSON in [`src/rag_gateway/infra_atlas-vector-index.json`](src/rag_gateway/infra_atlas-vector-index.json). It uses 1024-dimensional cosine similarity with scalar quantization and declares `tenant_id`, `document_id`, `embedding_model`, and `chunk_policy` as filter fields. Wait until Atlas reports the index ready before testing retrieval. The service does not update an existing managed index automatically.
 6. **Ingest a small, non-sensitive corpus.** Start with a few Markdown/text files. Check ingestion counts, run retrieval, inspect scores and source text, then ask known-answer questions through chat. Confirm a question with no matching evidence is handled as unknown.
 7. **Connect Open WebUI.** Add an OpenAI-compatible connection with base URL `http://localhost:8000/v1` when Open WebUI runs on the host. If Open WebUI runs in Docker, use `http://host.docker.internal:8000/v1` and ensure the gateway is reachable from that container. Set its API key to `GATEWAY_API_KEY` when using shared-key mode, or to a registered key when `API_KEY_REGISTRY` is enabled; select model `rag-local` and send the authorized tenant in `X-Tenant-ID`.
 8. **Connect Hermes.** Configure its OpenAI-compatible provider/base URL as above, set the shared or tenant-registered key, and select `rag-local`. If your Hermes build does not support a custom OpenAI-compatible base URL, call `POST /v1/chat/completions` from its HTTP/API tool; keep the gateway key in the agent's secret store, not prompts or repository files.
 9. **Evaluate before broad rollout.** Build representative questions with expected source documents. Record retrieval hit rate, answer correctness, citation correctness, latency, embedding spend, and Atlas cost. Adjust chunk size/overlap and `RETRIEVAL_TOP_K` using this set.
-10. **Harden and operate.** Put the service behind authenticated TLS for remote clients, rotate keys, back up source documents, add structured request IDs and metrics, monitor Atlas/Voyage usage, and define deletion/re-index procedures. The optional key registry restricts keys to configured tenant IDs; it is not end-user identity or document-level ACL authorization.
+10. **Harden and operate.** Put the service behind authenticated TLS for remote clients, rotate keys, back up source documents, add structured request IDs and metrics, monitor Atlas and MongoDB AI model usage, and define deletion/re-index procedures. The optional key registry restricts keys to configured tenant IDs; it is not end-user identity or document-level ACL authorization.
 
 For tenant-scoped API keys, set `API_KEY_REGISTRY` to a JSON object mapping each bearer key's SHA-256 hex digest to its allowed tenant IDs, for example `{"<sha256-hex>":["tenant-a"]}`. Hash the exact bearer secret with SHA-256 and use its lowercase hexadecimal digest as the key. When the registry is non-empty, it replaces `GATEWAY_API_KEY` authentication: only registered secrets are accepted, and each can ingest, retrieve, or delete data only for its configured tenants. Ingestion uses the request body's `tenant_id`; retrieval, chat, and deletion use `X-Tenant-ID` (or `DEFAULT_TENANT_ID` if omitted). Leave the registry empty to retain shared-key behavior.
 
@@ -47,7 +47,7 @@ For tenant-scoped API keys, set `API_KEY_REGISTRY` to a JSON object mapping each
 - Linux host with Miniconda or another Conda distribution, and Git.
 - A running Ollama service and a model already pulled (`ollama list`). Set `OLLAMA_MODEL` to the exact installed model tag.
 - A MongoDB Atlas cluster with Vector Search available, a database user, and a network rule for the gateway host.
-- A Voyage AI API key.
+- A MongoDB AI Models API key.
 - Docker Engine and the Compose plugin only if using the optional container deployment.
 
 ## Linux Setup (Miniconda)
@@ -64,7 +64,7 @@ ollama list
 python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
-In `.env`, set `MONGODB_URI`, `VOYAGE_API_KEY`, and one authentication mode: `GATEWAY_API_KEY` for shared-key mode, or a non-empty `API_KEY_REGISTRY` for tenant-scoped keys. See [Generate and use gateway keys](#generate-and-use-gateway-keys) below. Set `OLLAMA_MODEL` to an installed Ollama tag. For native Linux execution, the default `OLLAMA_BASE_URL=http://localhost:11434/v1` is suitable when Ollama listens on its normal local port.
+In `.env`, set `MONGODB_URI`, `MONGODB_API_KEY`, and one authentication mode: `GATEWAY_API_KEY` for shared-key mode, or a non-empty `API_KEY_REGISTRY` for tenant-scoped keys. See [Generate and use gateway keys](#generate-and-use-gateway-keys) below. Set `OLLAMA_MODEL` to an installed Ollama tag. For native Linux execution, the default `OLLAMA_BASE_URL=http://localhost:11434/v1` is suitable when Ollama listens on its normal local port.
 
 The Conda environment installs the project and its development tools from `pyproject.toml`. To apply later dependency changes, run `conda env update -f environment.yml --prune` while the environment is active.
 
@@ -104,12 +104,12 @@ Atlas must have a running cluster with Vector Search available, a database user 
 Create the collection in Atlas Data Explorer first, or start the gateway once after configuring `MONGODB_URI` so it creates the collection and ordinary `{tenant_id, document_id}` index. Then create the managed Vector Search index:
 
 1. In Atlas Data Explorer, select the configured database and collection, then open **Search & Vector Search** and choose **Create Search Index** / **Vector Search**.
-2. When Atlas asks how vectors will be created, choose **Bring your own embeddings**. This application generates vectors with Voyage AI and stores them in the `embedding` field; do not choose **Automated Embedding**, which asks Atlas to generate/manage embeddings for text fields instead.
+2. When Atlas asks how vectors will be created, choose **Bring your own embeddings**. This application generates vectors through the configured MongoDB AI Models API and stores them in the `embedding` field; do not choose **Automated Embedding**, which asks Atlas to generate/manage embeddings for text fields instead.
 3. Choose the JSON editor and paste the contents of [`src/rag_gateway/infra_atlas-vector-index.json`](src/rag_gateway/infra_atlas-vector-index.json). The file uses Atlas's index-definition JSON shape with a top-level `fields` array; set the index name separately in Atlas. The duplicate deployment copy is [`infra/atlas-vector-index.json`](infra/atlas-vector-index.json); both definitions must stay aligned.
 4. Set the index name to `rag_chunks_vector`, matching `ATLAS_VECTOR_INDEX` in `.env`. The definition uses the `embedding` field with 1024 dimensions and cosine similarity, plus `tenant_id`, `document_id`, `embedding_model`, and `chunk_policy` as filter fields.
 5. Create/save the index and wait until Atlas reports **READY**. Vector retrieval will not work while it is building or if the filter fields are missing. The service does not create or update this managed index on startup.
 
-The dimensions in the index must match the Voyage model output and `EMBEDDING_DIMENSIONS`. If you change the model or dimensions later, re-embed the corpus and create/migrate the index deliberately; editing the JSON file alone does not change an index already deployed in Atlas. The default score cutoff is `0.72`; calibrate `RETRIEVAL_MIN_SCORE` against representative queries.
+The dimensions in the index must match the configured embedding model output and `EMBEDDING_DIMENSIONS`. If you change the model or dimensions later, re-embed the corpus and create/migrate the index deliberately; editing the JSON file alone does not change an index already deployed in Atlas. The default score cutoff is `0.72`; calibrate `RETRIEVAL_MIN_SCORE` against representative queries.
 
 ### Ingest local files
 
@@ -120,7 +120,7 @@ export GATEWAY_API_KEY="your-local-key"
 python scripts/ingest_folder.py ./sample-docs --tenant default
 ```
 
-The script sends file contents to the local gateway, which sends text to Voyage AI for embeddings. Document IDs are relative paths; rerunning updates those documents. Voyage requests are capped by `EMBEDDING_BATCH_SIZE` and an estimated 100,000-token batch budget; transient transport errors and HTTP 408, 429, 500, 502, 503, and 504 responses are retried up to five attempts with backoff. Token counts are estimates, not tokenizer-exact limits. The API also accepts one document as JSON at `POST /v1/ingest`.
+The script sends file contents to the local gateway, which sends text to the configured MongoDB AI model endpoint for embeddings. Document IDs are relative paths; rerunning updates those documents. Embedding requests are capped by `EMBEDDING_BATCH_SIZE` and an estimated 100,000-token batch budget; transient transport errors and HTTP 408, 429, 500, 502, 503, and 504 responses are retried up to five attempts with backoff. Token counts are estimates, not tokenizer-exact limits. The API also accepts one document as JSON at `POST /v1/ingest`.
 
 ### Ollama document loader
 
@@ -214,12 +214,13 @@ See `.env.example`. Important settings:
 | --- | --- | --- |
 | `MONGODB_URI` | empty | Atlas SRV connection URI |
 | `MONGODB_API_MODEL_ENDPOINT` | `ai.mongodb.com` | MongoDB API model service hostname |
+| `MONGODB_API_KEY` | empty | Key used for embedding requests and the startup model check |
 | `VOYAGE_EMBEDDING_MODEL` | `voyage-3.5` | Model used for documents and queries |
 | `EMBEDDING_DIMENSIONS` | `1024` | Must match model output and Atlas index |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local Ollama OpenAI-compatible API |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Exact locally installed model tag |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `150` | Character-based chunking; tune with evaluation |
-| `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one Voyage request (also constrained by the estimated token budget) |
+| `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one embedding request (also constrained by the estimated token budget) |
 | `RETRIEVAL_TOP_K` | `5` | Maximum retrieved chunks per request |
 | `RETRIEVAL_MIN_SCORE` | `0.72` | Minimum Atlas vector score accepted as evidence; calibrate against an evaluation set |
 | `API_KEY_REGISTRY` | `{}` | JSON map of SHA-256 bearer-key hashes to allowed tenant IDs; overrides the shared key when non-empty |
@@ -228,6 +229,8 @@ See `.env.example`. Important settings:
 | `DOCUMENT_LOADER_MAX_ACTIVE_JOBS` | `2` | Maximum concurrent browser loader jobs |
 | `DOCUMENT_PARSER_MODEL` | `glm-ocr:latest` | Ollama model used to parse PDF pages and images |
 | `DOCUMENT_PARSER_TIMEOUT_SECONDS` | `300` | Timeout for an Ollama parsing request |
+
+On startup, the gateway logs Ollama model discovery and checks the configured chat/document-parser model tags. It also pings MongoDB Atlas and logs the host and database/collection connection result without exposing URI credentials. When `MONGODB_API_KEY` is set, startup sends a small embeddings smoke request to `MONGODB_API_MODEL_ENDPOINT` using `VOYAGE_EMBEDDING_MODEL` and compares its returned vector size with `EMBEDDING_DIMENSIONS`. The smoke request uses the same MongoDB AI API endpoint and key used by ingestion, and may count toward API usage. Without `MONGODB_API_KEY`, the MongoDB AI API model check is logged as skipped, and embedding requests will fail with a configuration error.
 
 Each stored chunk also records `embedding_model`, `embedding_dim`, `chunk_policy`, and a SHA-256 hash of its chunk text. These fields provide provenance and support future migrations; they do not yet enable automatic re-embedding, unchanged-file skipping, or document-level fingerprint checks.
 
@@ -241,9 +244,9 @@ ruff check src tests scripts
 ## Limitations and next improvements
 
 - Chunking is character-based and does not preserve Markdown section structure. DOCX/PPTX extraction currently reads text and tables but not embedded images; the configured Ollama OCR model is used for PDF pages and standalone image files.
-- This starter stores chunk text and vectors together in Atlas. Atlas and Voyage are cloud services; do not ingest restricted content without approval.
+- This starter stores chunk text and vectors together in Atlas. Atlas and its AI model endpoint are cloud services; do not ingest restricted content without approval.
 - Tenant-scoped API keys are optional and configured statically through `API_KEY_REGISTRY`. There is no user identity provider, dynamic tenant provisioning, or document-level ACL enforcement.
-- Similarity search is the only retrieval mode. Evaluate Voyage reranking, hybrid full-text/vector retrieval, metadata/ACL filters, and query rewriting against a labeled test set before adding them.
+- Similarity search is the only retrieval mode. Evaluate reranking, hybrid full-text/vector retrieval, metadata/ACL filters, and query rewriting against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
 - There is no evaluation harness, reranker, hybrid search, structured request logging, or Prometheus metrics yet. Calibrate retrieval settings and evaluate quality before enabling further retrieval changes.
@@ -252,7 +255,6 @@ ruff check src tests scripts
 
 - [MongoDB Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search/)
 - [MongoDB Vector Search query stage](https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/)
-- [Voyage AI embeddings](https://docs.voyageai.com/docs/embeddings)
 - [Ollama OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md)
 - [Open WebUI OpenAI-compatible connections](https://docs.openwebui.com/getting-started/api-endpoints/)
 - [FastAPI deployment](https://fastapi.tiangolo.com/deployment/)

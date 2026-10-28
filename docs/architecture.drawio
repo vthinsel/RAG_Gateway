@@ -25,7 +25,7 @@
                 <mxCell id="gateway" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff1cc;strokeColor=#c08a20;strokeWidth=3;fontSize=16;fontStyle=1;" value="FastAPI RAG Gateway&#xa;Authentication | chunking | retrieval&#xa;OpenAI-compatible chat API" vertex="1">
                     <mxGeometry height="130" width="250" x="370" y="320" as="geometry"/>
                 </mxCell>
-                <mxCell id="voyage" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9e9e4;strokeColor=#bd7057;strokeWidth=2;fontSize=15;fontStyle=1;" value="Voyage AI&#xa;Embeddings API&#xa;Document + query vectors" vertex="1">
+                <mxCell id="voyage" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9e9e4;strokeColor=#bd7057;strokeWidth=2;fontSize=15;fontStyle=1;" value="MongoDB AI Models API&#xa;Embedding model&#xa;Document + query vectors" vertex="1">
                     <mxGeometry height="100" width="230" x="900" y="140" as="geometry"/>
                 </mxCell>
                 <mxCell id="atlas" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f2e2;strokeColor=#62934b;strokeWidth=2;fontSize=15;fontStyle=1;" value="MongoDB Atlas&#xa;Vector Search index&#xa;Chunks + metadata + vectors" vertex="1">

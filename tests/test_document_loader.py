@@ -22,6 +22,12 @@ from rag_gateway.document_loader import (
 from rag_gateway.main import _resolve_loader_directory
 
 
+def test_startup_logger_emits_info_with_uvicorn_default_root_level() -> None:
+    assert logging.getLogger().level >= logging.WARNING
+    assert main.logger.getEffectiveLevel() == logging.INFO
+    assert main.logger.name == "uvicorn.error"
+
+
 def test_scan_directory_applies_recursive_include_and_exclude(tmp_path: Path) -> None:
     (tmp_path / "root.txt").write_text("root", encoding="utf-8")
     nested = tmp_path / "nested"
@@ -91,12 +97,26 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    captured_requests: list[httpx.Request] = []
     settings = Settings(
         _env_file=None,
         mongodb_uri="mongodb://atlas.test",
+        mongodb_api_key="startup-test-key",
         document_loader_enabled=True,
         document_parser_model="glm-ocr:latest",
     )
+    original_async_client = httpx.AsyncClient
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [{"embedding": [0.0] * settings.embedding_dimensions}]},
+        )
+
+    def mock_async_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(respond)
+        return original_async_client(*args, **kwargs)
 
     class FakeStore:
         def __init__(self, _settings: Settings) -> None:
@@ -115,7 +135,7 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
             pass
 
         def list_models(self) -> list[str]:
-            return ["glm-ocr:latest", "llama3.2-vision:latest"]
+            return ["glm-ocr:latest", "llama3.2-vision:latest", settings.ollama_model]
 
         def close(self) -> None:
             pass
@@ -123,13 +143,24 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "AtlasStore", FakeStore)
     monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setattr(main.httpx, "AsyncClient", mock_async_client)
 
-    with caplog.at_level(logging.INFO, logger="rag_gateway.main"):
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         async with main.lifespan(main.app):
             pass
 
-    assert "Ollama discovered models: glm-ocr:latest, llama3.2-vision:latest" in caplog.text
-    assert "Connected to MongoDB Atlas database=rag_gateway collection=chunks" in caplog.text
+    assert "Ollama connection check succeeded; discovered models:" in caplog.text
+    assert "Configured Ollama document parser model 'glm-ocr:latest' is installed" in caplog.text
+    assert (
+        "MongoDB Atlas connection check succeeded: host=atlas.test "
+        "database=rag_gateway collection=chunks"
+    ) in caplog.text
+    assert "Configured Ollama chat model 'qwen2.5:7b' is installed" in caplog.text
+    assert "MongoDB AI API model check succeeded: model=voyage-3.5 dimensions=1024" in caplog.text
+    assert len(captured_requests) == 1
+    assert captured_requests[0].url == "https://ai.mongodb.com/v1/embeddings"
+    assert captured_requests[0].headers["Authorization"] == "Bearer " + settings.mongodb_api_key
+    assert "startup-test-key" not in caplog.text
 
 
 def test_ollama_parser_sends_image_and_ocr_prompt() -> None:

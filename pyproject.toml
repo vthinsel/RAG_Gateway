@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "atlas-rag-gateway"
 version = "0.1.0"
-description = "A local-first RAG gateway using MongoDB Atlas Vector Search and Voyage AI embeddings."
+description = "A local-first RAG gateway using MongoDB Atlas Vector Search and AI model embeddings."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

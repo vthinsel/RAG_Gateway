@@ -15,13 +15,13 @@ RAG, short for *Retrieval-Augmented Generation*, adds a search step before gener
 3. Add those passages to the conversation as evidence.
 4. Ask the model to answer from that evidence and say when evidence is missing.
 
-The gateway orchestrates this sequence. The local model generates the answer; MongoDB Atlas retrieves passages; Voyage AI converts text into search vectors.
+The gateway orchestrates this sequence. The local model generates the answer; MongoDB Atlas retrieves passages; the MongoDB AI Models API converts text into search vectors.
 
 ### Embeddings: represent meaning as a vector
 
 An embedding is a list of numbers calculated from text. Texts with similar meanings tend to produce nearby vectors. This makes it possible to find passages related to a question even when they do not use exactly the same words.
 
-By default, this application uses Voyage AI's `voyage-3.5` model to produce 1024-dimensional vectors. The same model is used for documents and questions, with distinct modes (`document` and `query`). The model's output dimensions, the `EMBEDDING_DIMENSIONS` setting, and the Atlas index must match.
+By default, this application requests the `voyage-3.5` embedding model through MongoDB's AI Models API to produce 1024-dimensional vectors. The same model is used for documents and questions, with distinct modes (`document` and `query`). The model's output dimensions, the `EMBEDDING_DIMENSIONS` setting, and the Atlas index must match.
 
 Search uses vector proximity with cosine similarity. Atlas returns a score; the application discards results below `RETRIEVAL_MIN_SCORE`, which defaults to `0.72`. Treat this threshold as a starting point to evaluate against your own questions, not a universal guarantee of relevance.
 
@@ -41,7 +41,7 @@ Reranking can improve the top results, but it usually adds a model call, latency
 
 ## 2. At a Glance
 
-The system has a local part and cloud services. Text sent to Voyage for embeddings and chunks/vectors stored in Atlas leave the local environment. Answer generation stays on the configured Ollama service.
+The system has a local part and cloud services. Text sent to MongoDB's AI model endpoint for embeddings and chunks/vectors stored in Atlas leave the local environment. Answer generation stays on the configured Ollama service.
 
 ```mermaid
 flowchart LR
@@ -60,7 +60,7 @@ flowchart LR
     end
 
     subgraph Cloud["Cloud services"]
-        Voyage["Voyage AI: embeddings"]
+        Voyage["MongoDB AI Models API: embeddings"]
         Atlas["MongoDB Atlas: chunks and vector search"]
     end
 
@@ -78,7 +78,7 @@ Application code is under `src/rag_gateway/`. Each module has one main responsib
 | [config.py](../src/rag_gateway/config.py) | Reads environment settings and validates values such as chunk size and overlap. |
 | [models.py](../src/rag_gateway/models.py) | Defines the data expected by the ingestion API and its response. |
 | [chunking.py](../src/rag_gateway/chunking.py) | Splits text into overlapping chunks. |
-| [voyage.py](../src/rag_gateway/voyage.py) | Calls Voyage's embedding API, batches texts, and retries selected transient errors. |
+| [voyage.py](../src/rag_gateway/voyage.py) | Calls the configured MongoDB AI model endpoint, batches texts, and retries selected transient errors. |
 | [store.py](../src/rag_gateway/store.py) | Writes, replaces, deletes, and searches chunks in MongoDB Atlas. |
 | [rag.py](../src/rag_gateway/rag.py) | Creates question embeddings, assembles sources into the prompt, and extracts a query from chat history. |
 | [document_loader.py](../src/rag_gateway/document_loader.py) | Scans directories, extracts multiple formats, calls the configured Ollama OCR model for pages/images, and reports progress. |
@@ -107,7 +107,7 @@ Ingestion prepares data for future searches. It does not ask the chat model to w
 1. `scripts/ingest_folder.py` recursively scans a folder and selects UTF-8 `.txt` and `.md` files.
 2. For each file, the script sends its text, relative path as `document_id`, a `tenant_id`, and metadata to `POST /v1/ingest`.
 3. FastAPI validates the request body, checks the `MAX_DOCUMENT_CHARS` limit, and asks the chunking module to split the text.
-4. `VoyageEmbedder` sends the chunks to Voyage with `input_type=document`. Requests are limited by `EMBEDDING_BATCH_SIZE` and an estimated token budget; selected transient errors are retried with backoff.
+4. `VoyageEmbedder` sends the chunks to the configured MongoDB AI model endpoint with `input_type=document`. Requests are limited by `EMBEDDING_BATCH_SIZE` and an estimated token budget; selected transient errors are retried with backoff.
 5. `AtlasStore` stores each chunk with its vector, tenant, document, position, metadata, embedding model and dimensions, chunking policy, and a SHA-256 hash of the text.
 
 ```mermaid
@@ -117,7 +117,7 @@ sequenceDiagram
     participant Script as ingest_folder.py
     participant API as FastAPI / Gateway
     participant Chunker as chunking.py
-    participant Voyage as Voyage AI
+    participant Voyage as MongoDB AI Models API
     participant Store as AtlasStore
     participant Atlas as MongoDB Atlas
 
@@ -182,7 +182,7 @@ A user types in Open WebUI or sends a request from Hermes. These applications do
 
 1. The client sends an OpenAI-compatible request to `POST /v1/chat/completions`, with `messages`, a bearer token, and optionally `X-Tenant-ID`.
 2. The gateway extracts the last three non-empty user messages and combines them to provide some context for follow-up questions, such as “what about backups?”
-3. The combined question is sent to Voyage with `input_type=query` to obtain a vector.
+3. The combined question is sent to the configured MongoDB AI model endpoint with `input_type=query` to obtain a vector.
 4. Atlas searches for the nearest chunks within the authorized tenant. The pipeline applies `RETRIEVAL_TOP_K`, then keeps results whose score is greater than or equal to `RETRIEVAL_MIN_SCORE`.
 5. The gateway adds the retrieved passages to a system message. Sources are labeled `[S1]`, `[S2]`, and so on. Document text is treated as untrusted data: selected prompt and citation markers are neutralized, and the evidence block uses a random delimiter.
 6. The augmented request is sent to Ollama's local chat API.
@@ -194,7 +194,7 @@ sequenceDiagram
     actor User
     participant Client as Open WebUI / Hermes / other client
     participant GW as Atlas RAG Gateway
-    participant Voyage as Voyage AI
+    participant Voyage as MongoDB AI Models API
     participant Atlas as MongoDB Atlas
     participant Ollama as Local Ollama
 
@@ -215,17 +215,54 @@ sequenceDiagram
 
 If no source meets the threshold, the gateway tells the model that no relevant evidence was found and asks it not to invent source-backed facts. This reduces hallucination risk but does not, by itself, guarantee that every answer is correct.
 
-## 6. Using Hermes, Open WebUI, or Another Client
+## 6. Configure Open WebUI and Hermes
 
-The client must be able to call an OpenAI-compatible chat API. It does not need RAG-specific code: it sends the conversation to the gateway, which performs retrieval and calls Ollama.
+Both clients should connect to the **RAG gateway**, not directly to Ollama or the MongoDB AI Models API. The gateway retrieves tenant-filtered Atlas context, adds it to the conversation, and then calls Ollama.
 
-- Base URL when the client runs on the same host: `http://localhost:8000/v1`.
-- From a Docker container, an address such as `http://host.docker.internal:8000/v1` may be needed; routing depends on Docker networking and the gateway's listen address.
-- Model name to select: `rag-local` by default. The application then passes the `OLLAMA_MODEL` value to Ollama.
-- Authentication: a shared bearer token or a key registered in `API_KEY_REGISTRY`.
-- Tenant: `X-Tenant-ID` for retrieval, chat, and deletion; the ingestion body contains `tenant_id`.
+### Before connecting a client
 
-The exact configuration fields vary between Hermes and Open WebUI versions. If a client cannot add `X-Tenant-ID`, configure its custom-header support or call the API with its HTTP tool. In registry mode, a key is authorized only for the tenants explicitly associated with its hash.
+1. Start the gateway and confirm it is ready at `GET /readyz`.
+2. Ingest a small set of documents using the intended tenant ID. Ingestion sets `tenant_id` in the request body; chat selects the same tenant using `X-Tenant-ID`.
+3. Check that the selected API key is accepted:
+
+   ```bash
+   curl -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+     http://127.0.0.1:8000/v1/models
+   ```
+
+4. Choose the gateway URL reachable from the client:
+   - Same host as the gateway: `http://localhost:8000/v1`
+   - Open WebUI in Docker, gateway on the host: `http://host.docker.internal:8000/v1` (and ensure the container can resolve/reach the host)
+   - Both in Docker on the same network: use the gateway service name, for example `http://rag-gateway:8000/v1`
+
+The client needs the gateway's raw bearer key as its API key. Do not use `MONGODB_API_KEY` here; that key is only for the gateway's embedding requests. With a non-empty `API_KEY_REGISTRY`, use a registered raw secret whose allowlist includes the tenant.
+
+### Open WebUI
+
+1. Open **Admin Panel → Settings → Connections** and add an **OpenAI-compatible** connection (the wording may vary by Open WebUI version).
+2. Set the **API Base URL** to the gateway URL above, including the `/v1` suffix.
+3. Set the **API key** to the raw `GATEWAY_API_KEY`, or to the registered raw key when using `API_KEY_REGISTRY`. Do not add the word `Bearer` to the key field.
+4. Save the connection, refresh or fetch its models, and select **`rag-local`**. This is the gateway's public model ID; the gateway forwards generation to its configured `OLLAMA_MODEL`.
+5. For a non-default tenant, configure the connection to send `X-Tenant-ID: your-tenant`. If the installed Open WebUI version does not expose custom headers for the connection, use the gateway's `DEFAULT_TENANT_ID` for that connection or another client that can set the header.
+6. Ask a question whose answer is present in the ingested documents. Check for citations such as `[S1]`; if the answer does not use expected context, test the same request with `curl` to isolate client configuration from retrieval.
+
+### Hermes
+
+1. Add a provider/model that supports a custom **OpenAI-compatible API base URL**.
+2. Set its base URL to the gateway URL above, including `/v1`, and its API key to the raw shared or registered gateway key (without a `Bearer ` prefix).
+3. Set the model ID to **`rag-local`**. Do not configure Hermes to call the embedding model; embeddings and Atlas retrieval are performed by the gateway.
+4. If the provider supports custom request headers, add `X-Tenant-ID: your-tenant` for a non-default tenant. The chosen key must be authorized for that tenant if `API_KEY_REGISTRY` is enabled.
+5. If your Hermes version/provider cannot use a custom OpenAI-compatible base URL, call `POST /v1/chat/completions` through its HTTP/API tool instead. Send the gateway key in `Authorization: Bearer ...`, the tenant in `X-Tenant-ID`, and an OpenAI-compatible body, for example:
+
+   ```json
+   {
+     "model": "rag-local",
+     "messages": [{"role": "user", "content": "What does the handbook say about leave?"}],
+     "stream": false
+   }
+   ```
+
+Keep the gateway key in the client's secret store or environment, not in prompts, shared configuration, or source control. For streaming responses, source metadata is sent in an initial SSE event using a non-standard `sources` extension; a client may display the answer without showing that metadata.
 
 ## 7. Configuration and Limitations
 
@@ -235,15 +272,18 @@ Settings are stored in `.env`; `.env.example` lists the names and starting value
 | --- | --- |
 | `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_COLLECTION` | Atlas connection and location of stored chunks. |
 | `MONGODB_API_MODEL_ENDPOINT` | MongoDB API model service hostname; defaults to `ai.mongodb.com`. |
+| `MONGODB_API_KEY` | Required for embedding requests; also used by the startup model check. |
 | `ATLAS_VECTOR_INDEX` | Name of the Vector Search index already created in Atlas. |
-| `VOYAGE_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Embedding service and vector format. |
+| `MONGODB_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | MongoDB AI embedding service and vector format. |
 | `GATEWAY_API_KEY` or `API_KEY_REGISTRY` | Shared authentication or static key-to-tenant authorization. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local generation service address and model. Compose overrides `OLLAMA_BASE_URL` in the container to reach the host. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Character-based document chunking. |
-| `EMBEDDING_BATCH_SIZE` | Maximum texts per Voyage request, in addition to the estimated token budget. |
+| `EMBEDDING_BATCH_SIZE` | Maximum texts per MongoDB AI model request, in addition to the estimated token budget. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Maximum result count and minimum accepted score. |
 
-Embeddings and storage are cloud services in this architecture: source text and questions are sent to Voyage, while chunks and their vectors are stored in Atlas. Check your organization's data classification and policies before using real documents.
+Embeddings and storage are cloud services in this architecture: source text and questions are sent to the configured MongoDB AI model endpoint, while chunks and their vectors are stored in Atlas. Check your organization's data classification and policies before using real documents.
+
+At startup, the gateway logs the Ollama models it discovers and pings Atlas without exposing URI credentials. If `MONGODB_API_KEY` is configured, it also sends a small model-check embedding request to the MongoDB AI API endpoint; this request may count toward API usage. Otherwise that check is logged as skipped. Document ingestion and query embedding use the same endpoint and key.
 
 The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It also has no reranker, hybrid search, evaluation set, Prometheus metrics, or document-level ACL filtering. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
 
@@ -255,7 +295,7 @@ After installing dependencies and configuring `.env`, start the API with:
 python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
-Before the first search, MongoDB Atlas must be reachable, the configured Vector Search index must be `READY`, the Voyage key must be configured, and Ollama must serve the selected chat model. See the [project README](../README.md) for platform-specific installation instructions.
+Before the first search, MongoDB Atlas must be reachable, the configured Vector Search index must be `READY`, `MONGODB_API_KEY` must be configured, and Ollama must serve the selected chat model. See the [project README](../README.md) for platform-specific installation instructions.
 
 Run the repository's automated tests with:
 
