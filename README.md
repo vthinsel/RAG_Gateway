@@ -40,7 +40,7 @@ The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document lo
 9. **Evaluate before broad rollout.** Build representative questions with expected source documents. Record retrieval hit rate, answer correctness, citation correctness, latency, embedding spend, and Atlas cost. Adjust chunk size/overlap and `RETRIEVAL_TOP_K` using this set.
 10. **Harden and operate.** Put the service behind authenticated TLS for remote clients, rotate keys, back up source documents, add structured request IDs and metrics, monitor Atlas and MongoDB AI model usage, and define deletion/re-index procedures. The optional key registry restricts keys to configured tenant IDs; it is not end-user identity or document-level ACL authorization.
 
-For tenant-scoped API keys, set `API_KEY_REGISTRY` to a JSON object mapping each bearer key's SHA-256 hex digest to its allowed tenant IDs, for example `{"<sha256-hex>":["tenant-a"]}`. Hash the exact bearer secret with SHA-256 and use its lowercase hexadecimal digest as the key. When the registry is non-empty, it replaces `GATEWAY_API_KEY` authentication: only registered secrets are accepted, and each can ingest, retrieve, or delete data only for its configured tenants. Ingestion uses the request body's `tenant_id`; retrieval, chat, and deletion use `X-Tenant-ID` (or `DEFAULT_TENANT_ID` if omitted). Leave the registry empty to retain shared-key behavior.
+For tenant-scoped API keys, set `API_KEY_REGISTRY` to a JSON object mapping each bearer key's SHA-256 hex digest to its allowed tenant IDs, for example `{"<sha256-hex>":["tenant-a"]}`. Hash the exact bearer secret with SHA-256 and use its lowercase hexadecimal digest as the key. Registered keys are restricted to their configured tenants. The raw `GATEWAY_API_KEY` remains an administrator credential for the document-loader, chunk-management, retrieval, evaluation, and chat tools, including when a registry is configured; on other routes with registry-only authentication, use a registered key. Ingestion uses the request body's `tenant_id`; retrieval, chat, and deletion use `X-Tenant-ID` (or `DEFAULT_TENANT_ID` if omitted). Leave the registry empty to retain shared-key behavior.
 
 ## Prerequisites
 
@@ -221,6 +221,7 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `GET /readyz` | Configuration and Atlas readiness |
 | `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials |
 | `GET /tools/evaluation` | Browser workbench for retrieval metrics against manually labeled questions |
+| `GET /tools/playground` | Try retrieval-only queries or chat grounded in retrieved sources |
 | `POST /v1/evaluations/retrieval` | Run retrieval hit-rate, recall, ranking, and latency evaluation cases |
 | `POST /v1/document-loader/preview` | Extract and preview one uploaded document without ingesting it |
 | `GET /v1/admin/environment` | Admin-only redacted settings snapshot |
@@ -231,17 +232,17 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `GET /v1/api/tags` | Ollama-compatible model discovery for clients that append `/api/tags` to the configured base URL |
 | `GET /v1/api/ps` | Ollama-compatible running-model status; empty because the gateway does not expose backend model process state |
 | `GET /v1/api/version` | Ollama-compatible version response using the gateway application version |
-| `POST /v1/api/chat` | Ollama-compatible chat route adapted to the gateway's RAG chat flow |
+| `POST /v1/api/chat` | Ollama-compatible chat route adapted to the gateway's RAG chat flow; optional `top_k` must be between 1 and 50 |
 | `POST /v1/ingest` | Chunk, embed, and upsert a document |
 | `DELETE /v1/documents/{document_id}` | Delete a document for `X-Tenant-ID` |
 | `GET /v1/chunks/tenants` | List chunk and document statistics for authorized tenants |
 | `GET /v1/chunks/documents?tenant_id=...` | List source documents and chunk counts for a tenant |
 | `DELETE /v1/chunks/documents/{document_id}?tenant_id=...` | Delete one document's chunks |
 | `DELETE /v1/chunks/tenant?tenant_id=...` | Delete every document and chunk in a tenant |
-| `POST /v1/retrieve` | Inspect top-k chunks for a query |
-| `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama |
+| `POST /v1/retrieve` | Inspect top-k chunks for a query; optional `top_k` must be between 1 and 50 |
+| `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama; optional `top_k` must be between 1 and 50 |
 
-The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs; metrics report hit rate, recall, mean reciprocal rank, and latency for retrieval only, not generated-answer quality. The evaluation API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use the gateway bearer key; keys managed by `API_KEY_REGISTRY` can only access their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
+The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs; metrics report hit rate, recall, mean reciprocal rank, and latency for retrieval only, not generated-answer quality. The API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/playground` to compare retrieval-only results with RAG chat, adjust the number of sources (1–50), and inspect source chunks or citations. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use bearer authentication; registered keys remain limited to their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
 
 Example ingestion body:
 

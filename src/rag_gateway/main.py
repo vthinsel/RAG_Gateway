@@ -378,6 +378,13 @@ def get_tenant_id(
     return tenant_id
 
 
+def _requested_top_k(value: Any, default: int) -> int:
+    top_k = default if value is None else value
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 50:
+        raise HTTPException(status_code=422, detail="top_k must be an integer between 1 and 50")
+    return top_k
+
+
 @app.get("/healthz")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -500,6 +507,11 @@ async def document_loader_ui(settings: Settings = Depends(get_settings)) -> File
 @app.get("/tools/evaluation", include_in_schema=False)
 async def evaluation_ui() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "evaluation.html")
+
+
+@app.get("/tools/playground", include_in_schema=False)
+async def playground_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "playground.html")
 
 
 @app.get("/tools/environment", include_in_schema=False)
@@ -1131,7 +1143,7 @@ async def delete_chunk_tenant(
 async def retrieve(
     body: dict[str, Any],
     x_tenant_id: str | None = Header(default=None),
-    allowed_tenants: list[str] | None = Depends(require_api_key),
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
     store: AtlasStore = Depends(get_store),
     embedder: VoyageEmbedder = Depends(get_embedder),
@@ -1140,8 +1152,16 @@ async def retrieve(
     if not isinstance(query, str) or not query.strip():
         raise HTTPException(status_code=422, detail="query must be a non-empty string")
     tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
+    top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
     try:
-        sources = await retrieve_context(query[: settings.max_query_chars], tenant_id, settings, embedder, store)
+        sources = await retrieve_context(
+            query[: settings.max_query_chars],
+            tenant_id,
+            settings,
+            embedder,
+            store,
+            top_k,
+        )
     except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
     return {"data": sources}
@@ -1252,6 +1272,7 @@ def _ollama_chat_body(body: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "messages": body.get("messages"),
         "stream": body.get("stream", True),
+        "top_k": body.get("top_k"),
     }
     option_mapping = {
         "temperature": "temperature",
@@ -1338,7 +1359,7 @@ async def chat_completions(
     body: dict[str, Any],
     request: Request,
     x_tenant_id: str | None = Header(default=None),
-    allowed_tenants: list[str] | None = Depends(require_api_key),
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
     store: AtlasStore = Depends(get_store),
     embedder: VoyageEmbedder = Depends(get_embedder),
@@ -1350,8 +1371,9 @@ async def chat_completions(
     sources: list[dict[str, Any]] = []
     if query:
         tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
+        top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
         try:
-            sources = await retrieve_context(query, tenant_id, settings, embedder, store)
+            sources = await retrieve_context(query, tenant_id, settings, embedder, store, top_k)
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
 
@@ -1390,7 +1412,7 @@ async def ollama_compatible_chat(
     body: dict[str, Any],
     request: Request,
     x_tenant_id: str | None = Header(default=None),
-    allowed_tenants: list[str] | None = Depends(require_api_key),
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
     store: AtlasStore = Depends(get_store),
     embedder: VoyageEmbedder = Depends(get_embedder),

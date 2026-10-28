@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG playground</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --green-soft: #dcefe5;
+      --red: #a63d35;
+      --yellow: #f0c663;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 "Segoe UI", "Aptos", sans-serif; }
+    header { background: #153b3e; color: #f6f8f3; padding: 28px max(24px, calc((100vw - 1060px) / 2)); border-bottom: 5px solid var(--yellow); }
+    header h1 { margin: 0; font-size: 25px; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 28px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; margin-bottom: 18px; }
+    h2 { font-size: 17px; margin: 0 0 14px; }
+    h3 { font-size: 15px; margin: 0 0 8px; }
+    .field { display: grid; gap: 5px; margin-bottom: 14px; }
+    label { color: #294549; font-size: 13px; font-weight: 650; }
+    input, select, textarea {
+      width: 100%; min-height: 40px; border: 1px solid #afc1ba; border-radius: 4px;
+      background: #fff; color: var(--ink); padding: 8px 10px; font: inherit;
+    }
+    textarea { min-height: 115px; resize: vertical; }
+    input:focus, select:focus, textarea:focus, button:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
+    .two { display: grid; grid-template-columns: 1fr 180px; gap: 12px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: #fff; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+    #message { min-height: 22px; color: var(--red); margin: 9px 0 0; }
+    #answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .source-list { display: grid; gap: 10px; }
+    .source { border: 1px solid var(--line); border-left: 4px solid #8bb9a8; border-radius: 4px; padding: 12px; }
+    .source-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+    .source-id { font-weight: 700; overflow-wrap: anywhere; }
+    .source-meta { color: var(--muted); font-size: 12px; }
+    .source pre { margin: 9px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .empty { color: var(--muted); font-style: italic; }
+    a { color: var(--green); }
+    @media (max-width: 620px) {
+      header { padding: 22px 18px; }
+      main { margin-top: 18px; padding: 0 12px 24px; }
+      section { padding: 16px; }
+      .two { grid-template-columns: 1fr; gap: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RAG playground</h1>
+    <p>Try retrieval alone or ask the configured chat model using retrieved evidence.</p>
+  </header>
+  <main>
+    <section aria-labelledby="request-title">
+      <h2 id="request-title">Ask a question</h2>
+      <div class="two">
+        <div class="field">
+          <label for="tenant">Tenant ID</label>
+          <input id="tenant" value="default" maxlength="256" required>
+        </div>
+        <div class="field">
+          <label for="top-k">Sources to retrieve</label>
+          <input id="top-k" type="number" min="1" max="50" value="5">
+        </div>
+      </div>
+      <div class="field">
+        <label for="token">Gateway bearer token</label>
+        <input id="token" type="password" autocomplete="off" required>
+        <span class="note">Enter the raw GATEWAY_API_KEY value (without quotes or a “Bearer ” prefix), or a registered tenant key. The gateway key is the administrator key and can access any tenant; registered keys remain tenant-scoped.</span>
+      </div>
+      <div class="field">
+        <label for="mode">Mode</label>
+        <select id="mode">
+          <option value="chat">Answer with RAG</option>
+          <option value="retrieve">Retrieve sources only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="query">Question</label>
+        <textarea id="query" maxlength="8000" placeholder="Ask a question about your ingested documents" required></textarea>
+      </div>
+      <div class="buttons">
+        <button id="submit" type="button">Run</button>
+      </div>
+      <p class="note">Chat mode calls the configured local model and includes source citations. Retrieval-only mode shows the matching chunks without generating an answer. Query text is sent to the configured embedding service.</p>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section id="answer-panel" aria-labelledby="answer-title" hidden>
+      <h2 id="answer-title">Answer</h2>
+      <div id="answer"></div>
+    </section>
+    <section aria-labelledby="sources-title">
+      <h2 id="sources-title">Sources</h2>
+      <div id="sources" class="source-list" aria-live="polite">
+        <p class="empty">Run a question to see retrieved sources.</p>
+      </div>
+    </section>
+    <p class="note"><a href="/">Back to gateway dashboard</a></p>
+  </main>
+  <script>
+    const message = document.querySelector("#message");
+    const sources = document.querySelector("#sources");
+    const answerPanel = document.querySelector("#answer-panel");
+    const answer = document.querySelector("#answer");
+
+    function renderSources(items, includeText) {
+      sources.replaceChildren();
+      if (!items.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "No relevant sources were retrieved.";
+        sources.append(empty);
+        return;
+      }
+      for (const [index, item] of items.entries()) {
+        const card = document.createElement("article");
+        card.className = "source";
+        const head = document.createElement("div");
+        head.className = "source-head";
+        const id = document.createElement("span");
+        id.className = "source-id";
+        id.textContent = item.citation ? `[${item.citation}] ${item.document_id}` : item.document_id;
+        const meta = document.createElement("span");
+        meta.className = "source-meta";
+        const score = Number(item.score);
+        meta.textContent = `Chunk ${item.chunk_index}${Number.isFinite(score) ? ` · score ${score.toFixed(3)}` : ""}`;
+        head.append(id, meta);
+        card.append(head);
+        if (includeText && item.text) {
+          const excerpt = document.createElement("pre");
+          excerpt.textContent = item.text;
+          card.append(excerpt);
+        }
+        sources.append(card);
+      }
+    }
+
+    document.querySelector("#submit").addEventListener("click", async event => {
+      message.textContent = "";
+      const button = event.currentTarget;
+      button.disabled = true;
+      answerPanel.hidden = true;
+      answer.textContent = "";
+      sources.replaceChildren();
+      try {
+        const token = document.querySelector("#token").value.trim();
+        const query = document.querySelector("#query").value.trim();
+        const tenant = document.querySelector("#tenant").value.trim();
+        const topK = Number(document.querySelector("#top-k").value);
+        if (!token) throw new Error("Enter a gateway bearer token.");
+        if (!query) throw new Error("Enter a question.");
+        if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
+        if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Sources to retrieve must be between 1 and 50.");
+
+        const mode = document.querySelector("#mode").value;
+        const response = await fetch(mode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": ["Bearer", token].join(" "),
+            "X-Tenant-ID": tenant,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(mode === "retrieve"
+            ? { query, top_k: topK }
+            : {
+                model: "rag-local",
+                messages: [{ role: "user", content: query }],
+                stream: false,
+                top_k: topK
+              })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (response.status === 401) throw new Error("Authentication failed. Enter the raw key value without quotes or a “Bearer ” prefix.");
+          if (response.status === 403) throw new Error("This key is not authorized for the selected tenant.");
+          throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`);
+        }
+
+        if (mode === "retrieve") {
+          renderSources(data.data || [], true);
+        } else {
+          const choice = data.choices?.[0];
+          answer.textContent = choice?.message?.content || "The model returned an empty answer.";
+          answerPanel.hidden = false;
+          renderSources(data.sources || [], false);
+        }
+        message.style.color = "#176f5b";
+        message.textContent = mode === "retrieve" ? "Retrieval complete." : "RAG answer complete.";
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

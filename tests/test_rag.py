@@ -436,6 +436,7 @@ def test_welcome_page_and_global_status(
         assert "/tools/chunks" in page_response.text
         assert "/tools/document-loader" in page_response.text
         assert "/tools/environment" in page_response.text
+        assert "/tools/playground" in page_response.text
         assert status_response.status_code == 200
         assert status_response.json()["status"] == "ready"
         assert status_response.json()["atlas"]["status"] == "connected"
@@ -611,6 +612,123 @@ def test_evaluation_ui_sends_entered_token_as_bearer_credential() -> None:
     assert '"Authorization": `******`' not in page
 
 
+def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="playground-admin-key",
+        api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
+    )
+    searches: list[tuple[str, int]] = []
+    upstream_payloads: list[dict[str, Any]] = []
+
+    class FakeStore:
+        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+            searches.append((tenant_id, limit))
+            return [
+                {
+                    "document_id": "guide.md",
+                    "chunk_index": 1,
+                    "text": "The example greenhouse opens at 08:00.",
+                    "score": 0.91,
+                    "metadata": {"source": "guide.md"},
+                }
+            ]
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert texts == ["When does it open?"]
+            assert input_type == "query"
+            return [[0.1, 0.2]]
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        upstream_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "It opens at 08:00. [S1]",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(app) as client:
+            previous_http = app.state.http
+            app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            try:
+                page = client.get("/tools/playground")
+                response = client.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": "Bearer playground-admin-key",
+                        "X-Tenant-ID": "tenant-b",
+                    },
+                    json={
+                        "model": "rag-local",
+                        "messages": [{"role": "user", "content": "When does it open?"}],
+                        "top_k": 2,
+                        "stream": False,
+                    },
+                )
+                tenant_scope_response = client.post(
+                    "/v1/retrieve",
+                    headers={
+                        "Authorization": "Bearer tenant-key",
+                        "X-Tenant-ID": "tenant-b",
+                    },
+                    json={"query": "When does it open?"},
+                )
+                invalid_top_k_response = client.post(
+                    "/v1/retrieve",
+                    headers={
+                        "Authorization": "Bearer playground-admin-key",
+                        "X-Tenant-ID": "tenant-b",
+                    },
+                    json={"query": "When does it open?", "top_k": 51},
+                )
+            finally:
+                import asyncio
+
+                asyncio.run(app.state.http.aclose())
+                app.state.http = previous_http
+
+        assert page.status_code == 200
+        assert "RAG playground" in page.text
+        assert response.status_code == 200
+        assert tenant_scope_response.status_code == 403
+        assert invalid_top_k_response.status_code == 422
+        assert response.json()["choices"][0]["message"]["content"] == "It opens at 08:00. [S1]"
+        assert response.json()["sources"][0]["document_id"] == "guide.md"
+        assert searches == [("tenant-b", 2)]
+        assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_embedder, None)
+
+
 def test_v1_root_and_ollama_tags_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None, gateway_api_key="test-key")
     monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
@@ -667,6 +785,7 @@ def test_ollama_api_chat_adapts_non_streaming_request(
                 "model": "rag-local",
                 "messages": [{"role": "user", "content": "Question"}],
                 "stream": False,
+                "top_k": 2,
                 "options": {"temperature": 0.2, "num_predict": 128},
             },
         )
@@ -675,6 +794,7 @@ def test_ollama_api_chat_adapts_non_streaming_request(
     assert captured["messages"] == [{"role": "user", "content": "Question"}]
     assert captured["temperature"] == 0.2
     assert captured["max_tokens"] == 128
+    assert captured["top_k"] == 2
     assert response.json()["message"] == {"role": "assistant", "content": "Answer from RAG"}
     assert response.json()["sources"] == [{"citation": "S1"}]
     assert response.json()["done"] is True

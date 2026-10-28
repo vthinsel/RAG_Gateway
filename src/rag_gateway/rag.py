@@ -21,9 +21,14 @@ async def retrieve_context(
     settings: Settings,
     embedder: VoyageEmbedder,
     store: AtlasStore,
+    top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     query_vector = (await embedder.embed([query], input_type="query"))[0]
-    return store.search(tenant_id, query_vector, settings.retrieval_top_k)
+    return store.search(
+        tenant_id,
+        query_vector,
+        top_k if top_k is not None else settings.retrieval_top_k,
+    )
 
 
 def add_rag_system_message(
