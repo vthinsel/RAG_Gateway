@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir ".[loader]" \
     && useradd --create-home --uid 10001 appuser
 
 USER appuser

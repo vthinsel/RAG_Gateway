@@ -341,6 +341,22 @@ def test_ollama_parser_sends_image_and_ocr_prompt() -> None:
     assert base64.b64decode(body["messages"][0]["images"][0]) == b"test image bytes"
 
 
+@pytest.mark.parametrize("extension", [".png", ".jpg", ".jpeg"])
+def test_extracts_ollama_supported_images_without_pillow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extension: str,
+) -> None:
+    image = tmp_path / f"diagram{extension}"
+    image.write_bytes(b"encoded image bytes")
+    parser = OllamaDocumentParser("http://ollama.test", "glm-ocr:latest")
+    parsed_images: list[bytes] = []
+    monkeypatch.setattr(parser, "parse_image", lambda value: parsed_images.append(value) or "OCR text")
+
+    assert parser.extract(image) == "OCR text"
+    assert parsed_images == [b"encoded image bytes"]
+
+
 def test_extracts_supported_text_formats_without_ollama(tmp_path: Path) -> None:
     text = tmp_path / "notes.md"
     text.write_text("# Notes\n\nLocal content", encoding="utf-8")

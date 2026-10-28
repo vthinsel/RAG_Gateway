@@ -162,7 +162,7 @@ Une ingestion directe est aussi possible en appelant `POST /v1/ingest` avec un c
 
 ### Chargeur multi-format Ollama
 
-Le chargeur partage le moteur `document_loader.py` entre un CLI et l'interface web locale. Le modèle OCR par défaut est `glm-ocr:latest` : les pages PDF sont rendues en images et envoyées via l'API locale d'Ollama ; les images PNG, JPEG, TIFF et BMP suivent le même chemin. Les formats texte, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM et PPTX utilisent des extracteurs locaux. Pour DOCX et PPTX, les textes et tableaux sont lus, mais les images incorporées ne sont pas analysées par cette version. Lorsque le chargeur web est activé, l'application journalise les modèles détectés par Ollama au démarrage.
+Le chargeur partage le moteur `document_loader.py` entre un CLI et l'interface web locale. Le modèle OCR par défaut est `glm-ocr:latest` : les pages PDF sont rendues localement en images puis envoyées via l'API locale d'Ollama ; les fichiers PNG/JPEG sont envoyés directement à Ollama, tandis que les fichiers TIFF/BMP sont d'abord convertis localement. Pillow n'est requis que pour convertir TIFF/BMP, pas pour l'OCR PNG/JPEG. Les formats texte, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM et PPTX utilisent des extracteurs locaux. Pour DOCX et PPTX, les textes et tableaux sont lus, mais les images incorporées ne sont pas analysées par cette version. Lorsque le chargeur web est activé, l'application journalise les modèles détectés par Ollama au démarrage.
 
 Installez les bibliothèques optionnelles et vérifiez que le modèle configuré est disponible dans Ollama :
 

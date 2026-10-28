@@ -135,7 +135,7 @@ The script sends file contents to the local gateway, which sends text to the con
 
 ### Ollama document loader
 
-The optional loader parses local files with the configured Ollama model and sends extracted text to the existing RAG ingestion pipeline. The default image OCR model is `glm-ocr:latest`: PDF pages are rendered as images and passed to Ollama; standalone image files use the same path. Text, Markdown, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM, and PPTX use local text/table extractors. Embedded images inside DOCX/PPTX are not parsed in this version. Supported image extensions are PNG, JPEG, TIFF, and BMP.
+The optional loader extracts text locally where possible and sends image content to the configured Ollama model for OCR. The default image OCR model is `glm-ocr:latest`: PDF pages are rendered locally and passed to Ollama; PNG and JPEG files are sent directly to Ollama, while TIFF/BMP files are converted locally first. Pillow is only needed for TIFF/BMP conversion, not for PNG/JPEG OCR. Text, Markdown, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM, and PPTX use local text/table extractors. Embedded images inside DOCX/PPTX are not parsed in this version. Supported image extensions are PNG, JPEG, TIFF, and BMP.
 
 Install the optional format dependencies and make sure the configured parser model is available through the local Ollama server:
 
@@ -189,6 +189,8 @@ docker compose logs -f rag-gateway
 ```
 
 Compose publishes the gateway on `127.0.0.1:8000` by default and points its container to Ollama at `host.docker.internal:11434` using Docker's `host-gateway` mapping. Compose sets `OLLAMA_BASE_URL` in the service environment, overriding any value for that variable in `.env`. Atlas Network Access must allow the host/container's public egress IP. If Open WebUI runs in a different container, add `host.docker.internal:host-gateway` to its `extra_hosts` and use `http://host.docker.internal:8000/v1`. If host-gateway routing is unavailable, place both containers on one Docker network and address the gateway by its Compose service name. The gateway container may need Ollama to listen on a Docker-reachable host interface; if so, configure Ollama's `OLLAMA_HOST` and firewall to allow only the required Docker bridge. Do not expose either service broadly to the LAN.
+
+The Docker image installs the `loader` optional dependencies so PDF and office documents can be parsed. Rebuild and recreate the container after changing the Dockerfile with `docker compose up --build -d`.
 
 ## API
 

@@ -307,10 +307,13 @@ class OllamaDocumentParser:
         return "\n\n".join(pages)
 
     def _extract_image(self, path: Path) -> str:
+        if path.suffix.casefold() in {".png", ".jpg", ".jpeg"}:
+            return self.parse_image(path.read_bytes())
+
         try:
             from PIL import Image, ImageSequence
         except ImportError as error:
-            raise RuntimeError("Install Pillow to prepare images for OCR") from error
+            raise RuntimeError("Install Pillow to convert TIFF/BMP images for Ollama OCR") from error
 
         parsed_pages = []
         with Image.open(path) as image:

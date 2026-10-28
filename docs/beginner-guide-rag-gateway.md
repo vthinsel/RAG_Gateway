@@ -162,7 +162,7 @@ Direct ingestion is also possible by calling `POST /v1/ingest` with a JSON body 
 
 ### Ollama multi-format loader
 
-The loader shares the `document_loader.py` engine between a CLI and a local web interface. The default OCR model is `glm-ocr:latest`: PDF pages are rendered as images and sent through Ollama's local API; PNG, JPEG, TIFF, and BMP images use the same path. Text, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM, and PPTX use local extractors. For DOCX and PPTX, text and tables are extracted, but embedded images are not analyzed in this version. When the web loader is enabled, application startup logs Ollama's discovered models.
+The loader shares the `document_loader.py` engine between a CLI and a local web interface. The default OCR model is `glm-ocr:latest`: PDF pages are rendered locally as images and sent through Ollama's local API; PNG/JPEG files go directly to Ollama, while TIFF/BMP files are converted locally first. Pillow is only needed for TIFF/BMP conversion, not PNG/JPEG OCR. Text, CSV, HTML, JSON, XML/YAML, DOCX, XLSX/XLSM, and PPTX use local extractors. For DOCX and PPTX, text and tables are extracted, but embedded images are not analyzed in this version. When the web loader is enabled, application startup logs Ollama's discovered models.
 
 Install the optional libraries and check that the configured model is available in Ollama:
 
