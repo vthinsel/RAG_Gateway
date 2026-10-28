@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +91,153 @@ def test_document_loader_ui_requires_opt_in(monkeypatch: pytest.MonkeyPatch) -> 
         response = client.get("/tools/document-loader")
 
     assert response.status_code == 200
-    assert "Local document loader" in response.text
+    assert "Document loader" in response.text
     assert "/v1/document-loader/jobs" in response.text
+
+
+def test_gateway_admin_key_and_registered_keys_can_access_loader_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_key = "gateway-admin-key"
+    tenant_key = "tenant-loader-key"
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key=admin_key,
+        api_key_registry={sha256(tenant_key.encode()).hexdigest(): ["tenant-a"]},
+        document_loader_enabled=True,
+    )
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return ["glm-ocr:latest"]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    try:
+        with TestClient(main.app) as client:
+            admin_response = client.get(
+                "/v1/document-loader/models",
+                headers={"Authorization": f"Bearer {admin_key}"},
+            )
+            tenant_response = client.get(
+                "/v1/document-loader/models",
+                headers={"Authorization": f"Bearer {tenant_key}"},
+            )
+            denied_response = client.get(
+                "/v1/document-loader/models",
+                headers={"Authorization": "Bearer invalid-key"},
+            )
+
+        assert admin_response.status_code == 200
+        assert tenant_response.status_code == 200
+        assert denied_response.status_code == 401
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+
+
+def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="test-key",
+        document_loader_enabled=True,
+    )
+    ingested_documents: list[tuple[str, str, str]] = []
+
+    class FakeStore:
+        def replace_document(
+            self,
+            tenant_id: str,
+            document_id: str,
+            chunks: list[str],
+            _embeddings: list[list[float]],
+            _metadata: dict[str, Any],
+        ) -> int:
+            ingested_documents.append((tenant_id, document_id, "\n".join(chunks)))
+            return len(chunks)
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "document"
+            return [[0.1, 0.2] for _ in texts]
+
+    class FakeParser:
+        model = "glm-ocr:latest"
+
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return [self.model]
+
+        def extract(self, path: Path) -> str:
+            return path.read_text(encoding="utf-8")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_store, lambda: FakeStore())
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(main.app) as client:
+            response = client.post(
+                "/v1/document-loader/uploads",
+                headers={"Authorization": "Bearer test-key"},
+                data={
+                    "relative_paths": json.dumps(
+                        ["lab/architecture.md", "diagram.mmd", "ignored.exe"]
+                    ),
+                    "tenant_id": "default",
+                },
+                files=[
+                    ("files", ("architecture.md", b"VM inventory", "text/markdown")),
+                    ("files", ("diagram.mmd", b"flowchart TD\n  A --> B", "text/plain")),
+                    ("files", ("ignored.exe", b"binary", "application/octet-stream")),
+                ],
+            )
+            assert response.status_code == 202, response.text
+            job_id = response.json()["job_id"]
+            for _ in range(50):
+                job_response = client.get(
+                    f"/v1/document-loader/jobs/{job_id}",
+                    headers={"Authorization": "Bearer test-key"},
+                )
+                job = job_response.json()
+                if job["status"] in {"completed", "completed_with_errors", "failed"}:
+                    break
+                time.sleep(0.01)
+
+            traversal_response = client.post(
+                "/v1/document-loader/uploads",
+                headers={"Authorization": "Bearer test-key"},
+                data={"relative_paths": json.dumps(["../outside.md"]), "tenant_id": "default"},
+                files=[("files", ("outside.md", b"must not escape the temporary directory"))],
+            )
+
+        assert job["status"] == "completed"
+        assert job["succeeded"] == 2
+        assert job["skipped"] == 1
+        assert traversal_response.status_code == 422
+        assert {document_id for _, document_id, _ in ingested_documents} == {
+            "lab/architecture.md",
+            "diagram.mmd",
+        }
+        assert all(tenant_id == "default" for tenant_id, _, _ in ingested_documents)
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+        main.app.dependency_overrides.pop(main.get_store, None)
+        main.app.dependency_overrides.pop(main.get_embedder, None)
 
 
 async def test_lifespan_logs_ollama_models_and_atlas_connection(
@@ -125,6 +272,12 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
         def ping(self) -> bool:
             return True
 
+        def vector_index_status(self) -> tuple[bool, bool]:
+            return True, True
+
+        def list_tenant_ids(self) -> list[str]:
+            return ["default", "lab"]
+
         def close(self) -> None:
             pass
 
@@ -155,6 +308,8 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
         "MongoDB Atlas connection check succeeded: host=atlas.test "
         "database=rag_gateway collection=chunks"
     ) in caplog.text
+    assert "Atlas Vector Search index is ready: name=rag_chunks_vector" in caplog.text
+    assert "Atlas collection tenants: default, lab" in caplog.text
     assert "Configured Ollama chat model 'qwen2.5:7b' is installed" in caplog.text
     assert "MongoDB AI API model check succeeded: model=voyage-3.5 dimensions=1024" in caplog.text
     assert len(captured_requests) == 1
@@ -189,6 +344,8 @@ def test_ollama_parser_sends_image_and_ocr_prompt() -> None:
 def test_extracts_supported_text_formats_without_ollama(tmp_path: Path) -> None:
     text = tmp_path / "notes.md"
     text.write_text("# Notes\n\nLocal content", encoding="utf-8")
+    mermaid = tmp_path / "diagram.mmd"
+    mermaid.write_text("flowchart TD\n  A --> B", encoding="utf-8")
     html = tmp_path / "page.html"
     html.write_text("<main>Visible <b>text</b></main><script>hidden()</script>", encoding="utf-8")
     csv_file = tmp_path / "data.csv"
@@ -196,6 +353,7 @@ def test_extracts_supported_text_formats_without_ollama(tmp_path: Path) -> None:
     parser = OllamaDocumentParser("http://ollama.test", "glm-ocr:latest")
     try:
         assert parser.extract(text) == "# Notes\n\nLocal content"
+        assert parser.extract(mermaid) == "flowchart TD\n  A --> B"
         assert parser.extract(html) == "Visible\ntext"
         assert parser.extract(csv_file) == "name | value\nAlpha | 42"
     finally:

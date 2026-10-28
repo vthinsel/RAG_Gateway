@@ -61,10 +61,12 @@ cp .env.example .env
 chmod 600 .env
 ${EDITOR:-nano} .env
 ollama list
-python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
+python -m rag_gateway
 ```
 
 In `.env`, set `MONGODB_URI`, `MONGODB_API_KEY`, and one authentication mode: `GATEWAY_API_KEY` for shared-key mode, or a non-empty `API_KEY_REGISTRY` for tenant-scoped keys. See [Generate and use gateway keys](#generate-and-use-gateway-keys) below. Set `OLLAMA_MODEL` to an installed Ollama tag. For native Linux execution, the default `OLLAMA_BASE_URL=http://localhost:11434/v1` is suitable when Ollama listens on its normal local port.
+
+Native startup reads `GATEWAY_BIND_ADDRESS` and `GATEWAY_PORT` from `.env`; use `python -m rag_gateway` or the installed `rag-gateway` command so those values are applied. Direct `uvicorn rag_gateway.main:app` starts Uvicorn with its own bind defaults and does not read these Gateway settings. In Docker Compose, the same variables configure the host-side published address and port; the container continues listening on `0.0.0.0:8000`.
 
 The Conda environment installs the project and its development tools from `pyproject.toml`. To apply later dependency changes, run `conda env update -f environment.yml --prune` while the environment is active.
 
@@ -95,7 +97,16 @@ To use tenant-scoped keys instead, generate a separate raw secret the same way, 
 python -c 'import getpass, hashlib; print(hashlib.sha256(getpass.getpass("Bearer key: ").encode()).hexdigest())'
 ```
 
-Set `API_KEY_REGISTRY` to a JSON object mapping that digest to its allowed tenants, for example `{"<sha256-hex>":["default","tenant-a"]}`. Give clients the raw secret, never the digest. A non-empty registry replaces shared-key authentication, so only keys in the registry are accepted. The requested tenant must be in that key's list. Use the same raw secret in `GATEWAY_API_KEY` for the local ingestion scripts that read that environment variable.
+`API_KEY_REGISTRY` must be a JSON object with this structure:
+
+```json
+{
+  "<lowercase SHA-256 hex digest of one raw bearer key>": ["tenant-a", "tenant-b"],
+  "<lowercase SHA-256 hex digest of another raw bearer key>": ["default"]
+}
+```
+
+Each property name is the 64-character lowercase hexadecimal SHA-256 digest of a raw bearer-key secret; each value is a JSON array of tenant ID strings that this key may access. Generate the digest from the exact raw secret using `hashlib.sha256(raw_secret.encode()).hexdigest()`. Do not put raw API secrets in `API_KEY_REGISTRY`, and give the client the raw secret, never the digest. A non-empty registry replaces shared-key authentication for normal API routes: only matching registered secrets are accepted and every requested tenant must be in that key's array. Browser management tools (`/tools/document-loader` and `/tools/chunks`) additionally accept `GATEWAY_API_KEY` as an administrator key with access to all tenants; registry keys remain tenant-scoped. The environment settings editor always requires `GATEWAY_API_KEY`. Ingestion uses the tenant in its JSON body; retrieval, chat, and chunk management use `X-Tenant-ID` or a `tenant_id` parameter. An empty registry retains shared-key authentication via `GATEWAY_API_KEY`. Keep `GATEWAY_API_KEY` configured as the key used by local ingestion scripts.
 
 ### Configure Atlas Vector Search
 
@@ -152,7 +163,7 @@ DOCUMENT_PARSER_MODEL=glm-ocr:latest
 DOCUMENT_PARSER_TIMEOUT_SECONDS=300
 ```
 
-Open `http://127.0.0.1:8000/tools/document-loader`, enter a gateway bearer token, select the Ollama parser model, and start a job. The page polls job status and displays the current file, eligible/processed/succeeded/failed counts, skipped files, and recent events. Jobs run in the gateway process and their status is kept in memory; a process restart loses active and historical job state. The API limits active jobs with `DOCUMENT_LOADER_MAX_ACTIVE_JOBS` (default `2`). Each source file is limited to 50 MiB, and extracted text must fit within `MAX_DOCUMENT_CHARS`.
+Open `http://127.0.0.1:8000/tools/document-loader`, enter a gateway bearer token, and select the Ollama parser model. Upload files or entire folders by choosing them or dragging them into the drop area; uploaded folders retain their relative paths as document IDs. The page also retains the option to scan an allowed directory already on the Gateway host. Browser uploads are limited to 500 files, 50 MiB per file, and 200 MiB total per job. The page polls job status and displays the current file, eligible/processed/succeeded/failed counts, skipped files, and recent events. Jobs run in the Gateway process and their status is kept in memory; a process restart loses active and historical job state. The API limits active jobs with `DOCUMENT_LOADER_MAX_ACTIVE_JOBS` (default `2`), and extracted text must fit within `MAX_DOCUMENT_CHARS`.
 
 ### Smoke-test retrieval and chat
 
@@ -183,15 +194,32 @@ Compose publishes the gateway on `127.0.0.1:8000` by default and points its cont
 
 All `/v1/*` endpoints require a bearer token. With an empty `API_KEY_REGISTRY`, it must match `GATEWAY_API_KEY`; with a non-empty registry, it must match a registered key hash.
 
+For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local`. The gateway root is also available at `GET /v1`; `GET /v1/api/tags` returns an Ollama-compatible listing containing the gateway model for clients that use Ollama-style discovery. `GET /v1/api/ps` returns an empty `models` list because the gateway does not track model residency, and `GET /v1/api/version` returns the gateway application version. Chat is supported through both OpenAI-compatible `POST /v1/chat/completions` and Ollama-compatible `POST /v1/api/chat`; both routes perform the same RAG retrieval before generation.
+
 | Method and path | Purpose |
 | --- | --- |
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Configuration and Atlas readiness |
+| `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials |
+| `GET /v1/admin/environment` | Admin-only redacted settings snapshot |
+| `PUT /v1/admin/environment` | Admin-only persistent settings update |
+| `POST /v1/admin/environment/gateway-api-key` | Admin-only generation of a new key, returned once and not persisted until saved |
+| `GET /v1` | Authenticated gateway status and compatibility routes |
 | `GET /v1/models` | Advertise the configured gateway model |
+| `GET /v1/api/tags` | Ollama-compatible model discovery for clients that append `/api/tags` to the configured base URL |
+| `GET /v1/api/ps` | Ollama-compatible running-model status; empty because the gateway does not expose backend model process state |
+| `GET /v1/api/version` | Ollama-compatible version response using the gateway application version |
+| `POST /v1/api/chat` | Ollama-compatible chat route adapted to the gateway's RAG chat flow |
 | `POST /v1/ingest` | Chunk, embed, and upsert a document |
 | `DELETE /v1/documents/{document_id}` | Delete a document for `X-Tenant-ID` |
+| `GET /v1/chunks/tenants` | List chunk and document statistics for authorized tenants |
+| `GET /v1/chunks/documents?tenant_id=...` | List source documents and chunk counts for a tenant |
+| `DELETE /v1/chunks/documents/{document_id}?tenant_id=...` | Delete one document's chunks |
+| `DELETE /v1/chunks/tenant?tenant_id=...` | Delete every document and chunk in a tenant |
 | `POST /v1/retrieve` | Inspect top-k chunks for a query |
 | `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama |
+
+The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The page uses the gateway bearer key; keys managed by `API_KEY_REGISTRY` can only view and delete their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
 
 Example ingestion body:
 
@@ -209,6 +237,8 @@ Use the same tenant ID at ingestion and query time. `X-Tenant-ID` selects retrie
 ## Configuration
 
 See `.env.example`. Important settings:
+
+The authenticated settings editor is available at `/tools/environment`. Enter the current `GATEWAY_API_KEY` in the page to load or save configuration; it can update all application settings, including credentials, without displaying existing secret values. **Generate new GATEWAY_API_KEY** creates a cryptographically random key and displays it once in the page so it can be copied. Copy it before saving: the server does not persist or return generated keys from the generation endpoint, and the settings page hides it again after save. Saving writes `.env` atomically with owner-only permissions; restart the Gateway and update clients to apply a rotated key. Blank secret inputs preserve the current value; use the corresponding Clear checkbox to remove an optional secret. Configure and use this page only over localhost or a trusted HTTPS connection. `GATEWAY_API_KEY` also acts as the administrator credential for the document-loader and chunks-management tools, even when `API_KEY_REGISTRY` is configured; registry-only keys remain scoped to their allowed tenants. Environment variables supplied by the process manager take precedence over `.env`, and Uvicorn command-line options such as `--host` and `--port` remain controlled by the launcher.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -230,7 +260,7 @@ See `.env.example`. Important settings:
 | `DOCUMENT_PARSER_MODEL` | `glm-ocr:latest` | Ollama model used to parse PDF pages and images |
 | `DOCUMENT_PARSER_TIMEOUT_SECONDS` | `300` | Timeout for an Ollama parsing request |
 
-On startup, the gateway logs Ollama model discovery and checks the configured chat/document-parser model tags. It also pings MongoDB Atlas and logs the host and database/collection connection result without exposing URI credentials. When `MONGODB_API_KEY` is set, startup sends a small embeddings smoke request to `MONGODB_API_MODEL_ENDPOINT` using `VOYAGE_EMBEDDING_MODEL` and compares its returned vector size with `EMBEDDING_DIMENSIONS`. The smoke request uses the same MongoDB AI API endpoint and key used by ingestion, and may count toward API usage. Without `MONGODB_API_KEY`, the MongoDB AI API model check is logged as skipped, and embedding requests will fail with a configuration error.
+On startup, the gateway logs Ollama model discovery and checks the configured chat/document-parser model tags. It also pings MongoDB Atlas, checks whether the configured `ATLAS_VECTOR_INDEX` exists and is queryable, and lists the distinct `tenant_id` values present in the configured collection. These diagnostics log the host and database/collection connection result without exposing URI credentials. When `MONGODB_API_KEY` is set, startup sends a small embeddings smoke request to `MONGODB_API_MODEL_ENDPOINT` using `VOYAGE_EMBEDDING_MODEL` and compares its returned vector size with `EMBEDDING_DIMENSIONS`. The smoke request uses the same MongoDB AI API endpoint and key used by ingestion, and may count toward API usage. Without `MONGODB_API_KEY`, the MongoDB AI API model check is logged as skipped, and embedding requests will fail with a configuration error.
 
 Each stored chunk also records `embedding_model`, `embedding_dim`, `chunk_policy`, and a SHA-256 hash of its chunk text. These fields provide provenance and support future migrations; they do not yet enable automatic re-embedding, unchanged-file skipping, or document-level fingerprint checks.
 

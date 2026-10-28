@@ -18,6 +18,7 @@ DEFAULT_INCLUDE_EXTENSIONS = (
     ".pdf",
     ".txt",
     ".md",
+    ".mmd",
     ".docx",
     ".xlsx",
     ".xlsm",
@@ -205,7 +206,7 @@ class OllamaDocumentParser:
 
     def extract(self, path: Path) -> str:
         extension = path.suffix.casefold()
-        if extension in {".txt", ".md", ".json", ".xml", ".yaml", ".yml", ".log"}:
+        if extension in {".txt", ".md", ".mmd", ".json", ".xml", ".yaml", ".yml", ".log"}:
             return path.read_text(encoding="utf-8-sig").strip()
         if extension == ".csv":
             return self._extract_csv(path)

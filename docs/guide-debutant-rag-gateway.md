@@ -89,16 +89,33 @@ Le code applicatif se trouve dans `src/rag_gateway/`. Chaque module a une respon
 
 ### Routes HTTP principales
 
-Les routes `/v1/*` demandent un bearer token. Avec `API_KEY_REGISTRY` vide, il doit correspondre à `GATEWAY_API_KEY`. Si le registre est configuré, la clé doit être inscrite et associée au tenant demandé.
+Les routes `/v1/*` demandent un bearer token. Avec `API_KEY_REGISTRY` vide, il doit correspondre à `GATEWAY_API_KEY`. Si le registre est configuré, les requêtes API standard exigent une clé inscrite et autorisée pour le tenant demandé. Les outils web acceptent soit la clé administrateur `GATEWAY_API_KEY` (tous les tenants), soit une clé inscrite limitée à ses tenants autorisés.
 
 | Route | Utilité |
 | --- | --- |
 | `GET /v1/models` | Annonce le nom de modèle exposé par la gateway, par défaut `rag-local`. |
+| `GET /v1/status` | Retourne l'état non sensible d'Atlas, de l'index, d'Ollama, de MongoDB AI API et de l'authentification. |
+| `GET /v1` | Retourne l'état authentifié de la gateway et ses routes de compatibilité. |
+| `GET /v1/api/tags` | Retourne une liste de modèles compatible Ollama contenant le modèle de la gateway. |
+| `GET /v1/api/ps` | Retourne une réponse compatible Ollama avec une liste vide ; l'état mémoire du modèle backend n'est pas exposé. |
+| `GET /v1/api/version` | Retourne une version compatible Ollama contenant la version de l'application gateway. |
+| `POST /v1/api/chat` | Accepte les requêtes de chat Ollama et les adapte au même flux RAG de chat. |
 | `POST /v1/ingest` | Reçoit un document, le découpe, crée ses embeddings et enregistre ses chunks. |
 | `DELETE /v1/documents/{document_id}` | Supprime un document pour le tenant sélectionné. |
+| `GET /v1/chunks/tenants` | Affiche le nombre de documents et de chunks pour les tenants autorisés à cette clé. |
+| `GET /v1/chunks/documents?tenant_id=...` | Liste les documents source et leur nombre de chunks pour un tenant. |
+| `DELETE /v1/chunks/documents/{document_id}?tenant_id=...` | Supprime un document source. |
+| `DELETE /v1/chunks/tenant?tenant_id=...` | Supprime tous les documents d'un tenant. |
+| `GET /v1/admin/environment` | Lecture administrateur des paramètres, avec secrets masqués. |
+| `PUT /v1/admin/environment` | Mise à jour persistante des paramètres, réservée à l'administrateur. |
+| `POST /v1/admin/environment/gateway-api-key` | Génère une nouvelle clé, retournée une fois et non persistée avant enregistrement. |
 | `POST /v1/retrieve` | Recherche et retourne les passages correspondant à une question, sans génération de réponse. |
 | `POST /v1/chat/completions` | Effectue la recherche, enrichit la conversation et transmet la demande à Ollama. |
 | `GET /healthz` et `GET /readyz` | Vérifient respectivement que le processus répond et que les dépendances/configurations essentielles sont disponibles. |
+
+La page `/tools/chunks` présente les mêmes statistiques par tenant et la liste des documents. Elle permet de supprimer un document ou tous ceux d'un tenant ; pour une suppression complète, il faut saisir l'identifiant du tenant afin de confirmer. Utilisez une clé autorisée pour le tenant concerné.
+
+La page racine (`/`) donne accès aux outils et à la documentation API, et affiche l'état en direct d'Atlas, de l'index vectoriel, d'Ollama, de l'API MongoDB AI Models et de l'authentification. `/tools/environment` permet de modifier tous les paramètres et les enregistre dans `.env` ; les secrets existants sont masqués. Le bouton **Generate new GATEWAY_API_KEY** crée une clé aléatoire cryptographique affichée une seule fois pour être copiée. Copiez-la avant l'enregistrement, puis redémarrez la gateway et mettez à jour les clients. Cette page d'administration exige le `GATEWAY_API_KEY` courant et doit être utilisée uniquement sur localhost ou en HTTPS de confiance.
 
 ## 4. Comment un document est ingéré
 
@@ -174,7 +191,7 @@ DOCUMENT_LOADER_ROOTS=["/data/policies","/data/handbooks"]
 DOCUMENT_PARSER_MODEL=glm-ocr:latest
 ```
 
-Après redémarrage du service, ouvrez `http://127.0.0.1:8000/tools/document-loader`, saisissez un bearer token, sélectionnez les types et lancez le job. La page affiche le fichier courant, les compteurs éligibles/traités/réussis/en échec, les fichiers ignorés et les événements récents. Les jobs et leur historique sont conservés en mémoire uniquement ; un redémarrage les efface. L'accès web est limité aux chemins de `DOCUMENT_LOADER_ROOTS` et aux tenants autorisés par la clé. Un fichier source est limité à 50 MiB et le texte extrait doit respecter `MAX_DOCUMENT_CHARS`.
+Après redémarrage du service, ouvrez `http://127.0.0.1:8000/tools/document-loader` et saisissez `GATEWAY_API_KEY` ou une clé de tenant inscrite. Vous pouvez sélectionner ou glisser-déposer des fichiers et des dossiers depuis votre appareil ; les chemins relatifs des dossiers sont conservés comme identifiants de document. L'interface permet aussi de parcourir les répertoires du serveur autorisés par `DOCUMENT_LOADER_ROOTS`. Les envois sont limités à 500 fichiers, 50 MiB par fichier et 200 MiB par job. La page affiche le fichier courant et l'avancement ; l'historique des jobs reste en mémoire et disparaît au redémarrage. Une clé inscrite doit autoriser le tenant sélectionné ; la clé administrateur donne accès à tous les tenants. Le texte extrait doit respecter `MAX_DOCUMENT_CHARS`.
 
 ## 5. Comment une question devient une réponse
 
@@ -264,6 +281,8 @@ Le client doit utiliser la clé bearer brute de la gateway. N'utilisez pas `MONG
 
 Conservez la clé gateway dans le gestionnaire de secrets ou l'environnement du client, jamais dans les prompts, une configuration partagée ou le dépôt Git. En streaming, les métadonnées de source sont envoyées dans un événement SSE initial avec l'extension non standard `sources` ; le client peut afficher la réponse sans présenter ces métadonnées.
 
+Toutes les routes de compatibilité `/v1` demandent le même bearer token de la gateway. `GET /v1` décrit les routes disponibles ; `GET /v1/api/tags` permet la découverte de modèle pour les clients qui ajoutent le chemin Ollama `/api/tags` ; `GET /v1/api/ps` retourne `{"models":[]}`, car la gateway ne suit pas l'état mémoire du modèle backend ; et `GET /v1/api/version` retourne la version de l'application gateway. Le chat fonctionne par `POST /v1/chat/completions` au format OpenAI ou par `POST /v1/api/chat` au format Ollama ; les deux utilisent la même recherche filtrée par tenant et la même génération.
+
 ## 7. Configuration et limites à connaître
 
 Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs de départ. Le chargeur web est contrôlé par `DOCUMENT_LOADER_ENABLED`, `DOCUMENT_LOADER_ROOTS` et `DOCUMENT_LOADER_MAX_ACTIVE_JOBS`. `DOCUMENT_PARSER_MODEL` et `DOCUMENT_PARSER_TIMEOUT_SECONDS` règlent le parseur Ollama. Parmi les autres paramètres importants :
@@ -281,9 +300,20 @@ Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs
 | `EMBEDDING_BATCH_SIZE` | Nombre maximal de textes par requête au modèle AI MongoDB, avec budget de tokens estimé en plus. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Nombre maximal de résultats et score minimal accepté. |
 
+`API_KEY_REGISTRY` est un objet JSON dont les clés sont les empreintes SHA-256 en hexadécimal minuscule des secrets bearer bruts, et dont les valeurs sont des tableaux d'identifiants de tenant. Exemple :
+
+```json
+{
+  "<sha256-hex-de-la-cle-client>": ["default", "tenant-a"],
+  "<sha256-hex-d-une-autre-cle>": ["tenant-b"]
+}
+```
+
+Calculez chaque clé de propriété avec `hashlib.sha256(secret_brut.encode()).hexdigest()`. Stockez uniquement l'empreinte dans le registre et transmettez le secret brut au client. Lorsque le registre n'est pas vide, les requêtes API standard utilisent uniquement les clés inscrites : chacune accède seulement aux tenants de sa liste et le tenant demandé doit correspondre. Les outils web acceptent aussi `GATEWAY_API_KEY` comme clé administrateur avec accès à tous les tenants ; les clés du registre restent limitées. Si le registre est vide, les requêtes API utilisent `GATEWAY_API_KEY`. L'éditeur d'environnement exige `GATEWAY_API_KEY` ; les clés limitées par registre ne peuvent pas administrer les paramètres.
+
 Les embeddings et le stockage sont des services cloud dans cette architecture : le texte source et les questions partent vers le point d'accès du modèle AI MongoDB configuré, et les chunks ainsi que leurs vecteurs résident dans Atlas. Vérifiez la classification des données et les règles de votre organisation avant d'utiliser des documents réels.
 
-Au démarrage, la gateway journalise les modèles Ollama détectés et envoie un ping à Atlas sans exposer les identifiants de l'URI. Si `MONGODB_API_KEY` est configurée, elle envoie également une petite requête d'embedding au point d'accès MongoDB AI, susceptible de compter dans l'utilisation de l'API ; sinon, cette vérification est journalisée comme ignorée. L'ingestion des documents et l'embedding des requêtes utilisent le même point d'accès et la même clé.
+Au démarrage, la gateway journalise les modèles Ollama détectés, envoie un ping à Atlas sans exposer les identifiants de l'URI, vérifie que l'index Vector Search configuré existe et est interrogeable, et liste les identifiants de tenant présents dans la collection. Si `MONGODB_API_KEY` est configurée, elle envoie également une petite requête d'embedding au point d'accès MongoDB AI, susceptible de compter dans l'utilisation de l'API ; sinon, cette vérification est journalisée comme ignorée. L'ingestion des documents et l'embedding des requêtes utilisent le même point d'accès et la même clé.
 
 L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. Elle n'intègre pas non plus de reranker, de recherche hybride, de jeu d'évaluation, de métriques Prometheus ou de filtrage ACL au niveau document. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
 
@@ -292,8 +322,10 @@ L'application stocke des informations de provenance sur les embeddings et les ch
 Après avoir installé les dépendances et configuré `.env`, on peut démarrer l'API ainsi :
 
 ```bash
-python -m uvicorn rag_gateway.main:app --host 127.0.0.1 --port 8000
+python -m rag_gateway
 ```
+
+Le démarrage natif lit `GATEWAY_BIND_ADDRESS` et `GATEWAY_PORT` depuis `.env` ; utilisez `python -m rag_gateway` (ou `rag-gateway`) plutôt que de lancer directement l'application ASGI avec Uvicorn. Avec Docker Compose, ces valeurs configurent l'adresse et le port publiés sur l'hôte ; le conteneur écoute sur `0.0.0.0:8000`.
 
 Avant la première recherche, il faut que MongoDB Atlas soit accessible, que l'index Vector Search configuré soit à l'état `READY`, que `MONGODB_API_KEY` soit configurée et qu'Ollama serve le modèle de chat choisi. Pour les instructions d'installation par plateforme, voir le [README du projet](../README.md).
 

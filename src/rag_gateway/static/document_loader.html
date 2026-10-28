@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Local document loader</title>
+  <title>Document loader</title>
   <style>
     :root {
       color-scheme: light;
@@ -48,6 +48,15 @@
     .check { display: flex; align-items: center; gap: 9px; margin: 2px 0 16px; }
     .check input { width: 18px; min-height: 18px; accent-color: var(--green); }
     .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    .drop-zone {
+      border: 2px dashed #8bb9a8; border-radius: 6px; background: #f4f8f4; color: var(--muted);
+      padding: 18px; text-align: center; cursor: pointer; margin: 8px 0 12px;
+    }
+    .drop-zone.dragging { background: var(--green-soft); border-color: var(--green); color: var(--ink); }
+    .file-picker { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .file-picker label { display: inline-flex; gap: 6px; align-items: center; }
+    .file-picker input { width: auto; min-height: 0; }
+    #selected-files { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
     button {
       min-height: 40px; border: 1px solid var(--green); border-radius: 4px;
       background: var(--green); color: white; padding: 8px 14px; font: inherit; font-weight: 650;
@@ -82,8 +91,8 @@
 </head>
 <body>
   <header>
-    <h1>Local document loader</h1>
-    <p>Parse supported files with an Ollama OCR model and send extracted text to the RAG gateway.</p>
+    <h1>Document loader</h1>
+    <p>Upload files from your device or scan an allowed gateway-host directory, then send extracted text to the RAG gateway.</p>
   </header>
   <main>
     <div class="layout">
@@ -91,8 +100,19 @@
         <h2 id="settings-title">Job settings</h2>
         <form id="loader-form">
           <div class="field">
-            <label for="directory">Directory on the gateway host</label>
-            <input id="directory" name="directory" required placeholder="C:\\Data\\Policies or /data/policies">
+            <label for="directory">Directory on the gateway host (optional alternative)</label>
+            <input id="directory" name="directory" placeholder="C:\\Data\\Policies or /data/policies">
+          </div>
+          <div class="field">
+            <label>Upload from this device</label>
+            <div class="file-picker">
+              <label><input id="file-picker" type="file" multiple> Choose files</label>
+              <label><input id="directory-picker" type="file" webkitdirectory multiple> Choose a folder</label>
+            </div>
+            <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop files or folders here, or choose files">
+              Drop files or folders here, or click to choose files
+            </div>
+            <div id="selected-files" aria-live="polite">No files selected</div>
           </div>
           <div class="two">
             <div class="field">
@@ -121,9 +141,11 @@
           <label class="check"><input id="recursive" type="checkbox" checked> Scan subdirectories recursively</label>
           <div class="buttons">
             <button type="button" class="secondary" id="refresh-models">Check Ollama models</button>
-            <button type="submit" id="start">Start loading</button>
+            <button type="submit" id="start-local">Scan gateway directory</button>
+            <button type="button" id="start-upload">Upload selected files</button>
           </div>
-          <p class="note">The web loader can only read directories listed in DOCUMENT_LOADER_ROOTS. Extracted document text is sent to the configured embedding service and Atlas.</p>
+          <p class="note">Uploads support files up to 50 MiB each and 200 MiB total per job (maximum 500 files). Supported file types use the configured parser and OCR model; unsupported types are skipped. Extracted text is sent to the configured embedding service and Atlas.</p>
+          <p class="note">The gateway-directory option can only read paths listed in DOCUMENT_LOADER_ROOTS.</p>
           <p id="message" role="status" aria-live="polite"></p>
         </form>
       </section>
@@ -150,23 +172,109 @@
     const modelSelect = document.querySelector("#model");
     const message = document.querySelector("#message");
     const eventsList = document.querySelector("#events");
+    const selectedFilesLabel = document.querySelector("#selected-files");
+    let selectedUploads = [];
     let activeJob = null;
 
     function extensions(value) {
       return value.split(",").map(item => item.trim()).filter(Boolean);
     }
 
+    function setSelectedUploads(files) {
+      selectedUploads = files;
+      const totalBytes = files.reduce((total, item) => total + item.file.size, 0);
+      selectedFilesLabel.textContent = files.length
+        ? `${files.length} file(s), ${(totalBytes / (1024 * 1024)).toFixed(1)} MiB selected: ${files.slice(0, 8).map(item => item.path).join(", ")}${files.length > 8 ? ", ..." : ""}`
+        : "No files selected";
+    }
+
+    document.querySelector("#file-picker").addEventListener("change", event => {
+      setSelectedUploads(Array.from(event.target.files, file => ({ file, path: file.name })));
+    });
+    document.querySelector("#directory-picker").addEventListener("change", event => {
+      setSelectedUploads(Array.from(event.target.files, file => ({
+        file,
+        path: file.webkitRelativePath || file.name
+      })));
+    });
+
+    async function filesFromDrop(items) {
+      async function walk(entry, prefix = "") {
+        if (entry.isFile) {
+          const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+          return [{ file, path: `${prefix}${entry.name}` }];
+        }
+        if (!entry.isDirectory) return [];
+        const reader = entry.createReader();
+        const children = [];
+        while (true) {
+          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (!batch.length) break;
+          children.push(...batch);
+        }
+        return (await Promise.all(
+          children.map(child => walk(child, `${prefix}${entry.name}/`))
+        )).flat();
+      }
+
+      const entries = Array.from(items, item => item.webkitGetAsEntry?.()).filter(Boolean);
+      if (!entries.length) return Array.from(items).flatMap(item => {
+        const file = item.getAsFile?.();
+        return file ? [{ file, path: file.name }] : [];
+      });
+      return (await Promise.all(entries.map(entry => walk(entry)))).flat();
+    }
+
+    const dropZone = document.querySelector("#drop-zone");
+    const filePicker = document.querySelector("#file-picker");
+    dropZone.addEventListener("click", () => filePicker.click());
+    dropZone.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        filePicker.click();
+      }
+    });
+    for (const eventName of ["dragenter", "dragover"]) {
+      dropZone.addEventListener(eventName, event => {
+        event.preventDefault();
+        dropZone.classList.add("dragging");
+      });
+    }
+    for (const eventName of ["dragleave", "drop"]) {
+      dropZone.addEventListener(eventName, event => {
+        event.preventDefault();
+        dropZone.classList.remove("dragging");
+      });
+    }
+    dropZone.addEventListener("drop", async event => {
+      try {
+        setSelectedUploads(await filesFromDrop(event.dataTransfer.items));
+        if (!selectedUploads.length) throw new Error("No files found in the dropped items.");
+        message.style.color = "#176f5b";
+        message.textContent = "Dropped files are ready to upload.";
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      }
+    });
+
     async function api(path, options = {}) {
+      tokenInput.value = tokenInput.value.trim();
       const response = await fetch(path, {
         ...options,
         headers: {
           "Authorization": `Bearer ${tokenInput.value.trim()}`,
-          "Content-Type": "application/json",
+          ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
           ...(options.headers || {})
         }
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Authentication failed. Use the current GATEWAY_API_KEY or a registered tenant key. Restart after rotating GATEWAY_API_KEY; a process-manager environment variable overrides .env.");
+        }
+        throw new Error(data.detail || `Request failed (${response.status})`);
+      }
       return data;
     }
 
@@ -193,9 +301,14 @@
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
+      await startLocalJob();
+    });
+
+    async function startLocalJob() {
       message.style.color = "#a63d35";
       message.textContent = "";
-      document.querySelector("#start").disabled = true;
+      const startButton = document.querySelector("#start-local");
+      startButton.disabled = true;
       try {
         const data = await api("/v1/document-loader/jobs", {
           method: "POST",
@@ -215,7 +328,34 @@
         pollJob();
       } catch (error) {
         message.textContent = error.message;
-        document.querySelector("#start").disabled = false;
+        startButton.disabled = false;
+      }
+    }
+
+    document.querySelector("#start-upload").addEventListener("click", async () => {
+      if (!selectedUploads.length) {
+        message.textContent = "Choose or drop files or a folder before starting an upload.";
+        return;
+      }
+      const uploadButton = document.querySelector("#start-upload");
+      uploadButton.disabled = true;
+      message.style.color = "#a63d35";
+      message.textContent = "Uploading files to the gateway...";
+      try {
+        const body = new FormData();
+        for (const item of selectedUploads) body.append("files", item.file, item.path);
+        body.append("relative_paths", JSON.stringify(selectedUploads.map(item => item.path)));
+        body.append("tenant_id", document.querySelector("#tenant").value.trim());
+        body.append("model", modelSelect.value || "");
+        body.append("include_extensions", document.querySelector("#include").value);
+        body.append("exclude_extensions", document.querySelector("#exclude").value);
+        const data = await api("/v1/document-loader/uploads", { method: "POST", body });
+        activeJob = data.job_id;
+        eventsList.replaceChildren();
+        pollJob();
+      } catch (error) {
+        message.textContent = error.message;
+        uploadButton.disabled = false;
       }
     });
 
@@ -241,7 +381,8 @@
         const terminal = ["completed", "completed_with_errors", "failed"].includes(job.status);
         if (terminal) {
           activeJob = null;
-          document.querySelector("#start").disabled = false;
+          document.querySelector("#start-local").disabled = false;
+          document.querySelector("#start-upload").disabled = false;
           message.style.color = job.failed ? "#a63d35" : "#176f5b";
           message.textContent = `${job.succeeded || 0} succeeded, ${job.failed || 0} failed, ${job.skipped || 0} skipped.`;
           return;
@@ -249,7 +390,8 @@
         window.setTimeout(pollJob, 900);
       } catch (error) {
         activeJob = null;
-        document.querySelector("#start").disabled = false;
+        document.querySelector("#start-local").disabled = false;
+        document.querySelector("#start-upload").disabled = false;
         message.textContent = error.message;
       }
     }

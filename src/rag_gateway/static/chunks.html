@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG chunks management</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --red: #a63d35;
+      font: 15px/1.5 "Segoe UI", "Aptos", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); }
+    header { background: #153b3e; color: #f6f8f3; padding: 24px max(20px, calc((100vw - 1060px) / 2)); }
+    header h1 { margin: 0; font-size: 24px; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 24px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; margin-bottom: 16px; }
+    h2 { font-size: 17px; margin: 0 0 12px; }
+    .controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+    .field { flex: 1; min-width: 220px; }
+    label { display: block; color: #294549; font-size: 13px; font-weight: 650; }
+    input, select { width: 100%; min-height: 40px; margin-top: 4px; border: 1px solid #afc1ba; border-radius: 4px; padding: 8px 10px; font: inherit; }
+    button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: white; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: white; color: var(--green); }
+    button.danger { background: var(--red); border-color: var(--red); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .muted { color: var(--muted); font-size: 13px; }
+    #message { min-height: 24px; margin: 10px 0 0; white-space: pre-wrap; }
+    .error { color: var(--red); }
+    .danger-zone { border-left: 4px solid var(--red); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #e4ebe6; text-align: left; vertical-align: middle; }
+    th { color: #294549; font-size: 13px; }
+    td.document { overflow-wrap: anywhere; }
+    td.actions { text-align: right; white-space: nowrap; }
+    td.actions button { min-height: 34px; padding: 4px 10px; }
+    #documents-title { overflow-wrap: anywhere; }
+    @media (max-width: 640px) {
+      header { padding: 20px; }
+      main { padding: 0 12px 24px; }
+      section { padding: 14px; }
+      td.actions button { white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RAG chunks management</h1>
+    <p>Review stored documents and chunk counts by tenant, or delete indexed content.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Connection</h2>
+      <div class="controls">
+        <div class="field">
+          <label for="token">Gateway bearer token</label>
+          <input id="token" type="password" autocomplete="off" placeholder="Token authorized for the tenants you manage">
+        </div>
+        <button id="load-tenants" type="button">Load tenants</button>
+      </div>
+      <p class="muted">Tenant-scoped API keys only show and manage tenants in their allowlist. The token is held in this page only.</p>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section>
+      <h2>Tenant statistics</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tenant ID</th><th>Documents</th><th>Chunks</th><th></th></tr></thead>
+          <tbody id="tenants"><tr><td colspan="4" class="muted">Load tenants to view statistics.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="document-section" hidden>
+      <h2 id="documents-title">Documents</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Source document</th><th>Chunks</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="documents"></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="delete-section" class="danger-zone" hidden>
+      <h2>Delete tenant data</h2>
+      <p id="delete-summary" class="muted"></p>
+      <button id="delete-tenant" class="danger" type="button">Delete all documents in this tenant</button>
+    </section>
+  </main>
+  <script>
+    const tokenInput = document.querySelector("#token");
+    const message = document.querySelector("#message");
+    const tenantBody = document.querySelector("#tenants");
+    const documentBody = document.querySelector("#documents");
+    const documentSection = document.querySelector("#document-section");
+    const deleteSection = document.querySelector("#delete-section");
+    let activeTenant = null;
+    let tenantStats = [];
+
+    function showMessage(text, failed = false) {
+      message.textContent = text;
+      message.classList.toggle("error", failed);
+    }
+
+    async function api(path, options = {}) {
+      tokenInput.value = tokenInput.value.trim();
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Authorization": `Bearer ${tokenInput.value}`,
+          ...(options.headers || {})
+        }
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Authentication failed. Use the current GATEWAY_API_KEY or a registered tenant key. Restart after rotating GATEWAY_API_KEY; a process-manager environment variable overrides .env.");
+        }
+        const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || body);
+        throw new Error(detail || `Request failed (${response.status})`);
+      }
+      return body;
+    }
+
+    function button(label, className, action) {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.textContent = label;
+      element.className = className;
+      element.addEventListener("click", action);
+      return element;
+    }
+
+    function renderTenants() {
+      tenantBody.replaceChildren();
+      if (!tenantStats.length) {
+        const row = tenantBody.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 4;
+        cell.className = "muted";
+        cell.textContent = "No tenant data found for this API key.";
+        return;
+      }
+      for (const tenant of tenantStats) {
+        const row = tenantBody.insertRow();
+        row.insertCell().textContent = tenant.tenant_id || "(empty tenant ID)";
+        row.insertCell().textContent = tenant.documents;
+        row.insertCell().textContent = tenant.chunks;
+        const actionCell = row.insertCell();
+        actionCell.className = "actions";
+        actionCell.append(button("View documents", "secondary", () => loadDocuments(tenant.tenant_id)));
+      }
+    }
+
+    function formatDate(value) {
+      if (!value) return "—";
+      const date = new Date(value);
+      return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString();
+    }
+
+    async function loadTenants() {
+      showMessage("Loading tenant statistics...");
+      document.querySelector("#load-tenants").disabled = true;
+      try {
+        const data = await api("/v1/chunks/tenants");
+        tenantStats = data.tenants;
+        renderTenants();
+        showMessage(`${tenantStats.length} tenant(s) found.`);
+        if (activeTenant && tenantStats.some(item => item.tenant_id === activeTenant)) {
+          await loadDocuments(activeTenant, false);
+        } else {
+          activeTenant = null;
+          documentSection.hidden = true;
+          deleteSection.hidden = true;
+        }
+      } catch (error) {
+        showMessage(error.message, true);
+      } finally {
+        document.querySelector("#load-tenants").disabled = false;
+      }
+    }
+
+    async function loadDocuments(tenantId, announce = true) {
+      if (announce) showMessage(`Loading documents for ${tenantId}...`);
+      try {
+        const data = await api(`/v1/chunks/documents?tenant_id=${encodeURIComponent(tenantId)}`);
+        activeTenant = data.tenant_id;
+        document.querySelector("#documents-title").textContent = `Documents in tenant: ${activeTenant}`;
+        documentBody.replaceChildren();
+        if (!data.documents.length) {
+          const row = documentBody.insertRow();
+          const cell = row.insertCell();
+          cell.colSpan = 4;
+          cell.className = "muted";
+          cell.textContent = "No documents in this tenant.";
+        }
+        for (const document of data.documents) {
+          const row = documentBody.insertRow();
+          const source = row.insertCell();
+          source.className = "document";
+          source.textContent = document.source || document.document_id;
+          source.title = document.document_id;
+          row.insertCell().textContent = document.chunks;
+          row.insertCell().textContent = formatDate(document.updated_at);
+          const actionCell = row.insertCell();
+          actionCell.className = "actions";
+          actionCell.append(button("Delete", "danger", () => deleteDocument(document.document_id)));
+        }
+        const stats = tenantStats.find(item => item.tenant_id === activeTenant);
+        document.querySelector("#delete-summary").textContent =
+          `${stats?.documents ?? data.documents.length} document(s), ${stats?.chunks ?? 0} chunk(s) will be permanently deleted from this tenant.`;
+        documentSection.hidden = false;
+        deleteSection.hidden = false;
+        if (announce) showMessage(`${data.documents.length} document(s) loaded for ${activeTenant}.`);
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    async function deleteDocument(documentId) {
+      if (!confirm(`Delete all chunks for this source document?\n\nTenant: ${activeTenant}\nDocument: ${documentId}`)) return;
+      showMessage(`Deleting ${documentId}...`);
+      try {
+        const result = await api(
+          `/v1/chunks/documents/${encodeURIComponent(documentId)}?tenant_id=${encodeURIComponent(activeTenant)}`,
+          { method: "DELETE" }
+        );
+        showMessage(`Deleted ${result.deleted_chunks} chunk(s) from ${documentId}.`);
+        await loadTenants();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    document.querySelector("#delete-tenant").addEventListener("click", async () => {
+      if (!activeTenant) return;
+      const confirmation = prompt(
+        `This permanently deletes every document and chunk for tenant "${activeTenant}". Type the tenant ID to confirm.`
+      );
+      if (confirmation !== activeTenant) {
+        if (confirmation !== null) showMessage("Tenant ID did not match; nothing was deleted.", true);
+        return;
+      }
+      showMessage(`Deleting all chunks for tenant ${activeTenant}...`);
+      try {
+        const result = await api(
+          `/v1/chunks/tenant?tenant_id=${encodeURIComponent(activeTenant)}`,
+          { method: "DELETE" }
+        );
+        activeTenant = null;
+        documentSection.hidden = true;
+        deleteSection.hidden = true;
+        showMessage(`Deleted ${result.deleted_chunks} chunk(s) from the tenant.`);
+        await loadTenants();
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    });
+
+    document.querySelector("#load-tenants").addEventListener("click", loadTenants);
+  </script>
+</body>
+</html>

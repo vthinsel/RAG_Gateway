@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway environment settings</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; }
+    .hint, .status { color: #777; }
+    .panel, fieldset { border: 1px solid #8886; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    .auth { display: flex; gap: .5rem; align-items: end; flex-wrap: wrap; }
+    .auth label { flex: 1; min-width: 18rem; }
+    label { display: block; font-weight: 600; }
+    input:not([type=checkbox]), textarea { box-sizing: border-box; width: 100%; margin-top: .25rem; }
+    input, textarea, button { font: inherit; padding: .5rem; }
+    textarea { min-height: 5rem; font-family: ui-monospace, monospace; }
+    .field { margin: 1rem 0; }
+    .field small { display: block; font-weight: 400; color: #777; }
+    .secret-clear { font-weight: 400; margin-top: .4rem; }
+    button { cursor: pointer; }
+    #message { white-space: pre-wrap; }
+    .warning { border-left: 4px solid #d99000; padding-left: .75rem; }
+    .secret-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+    .secret-actions button { padding: .35rem .65rem; }
+  </style>
+</head>
+<body>
+  <h1>Gateway environment settings</h1>
+  <p class="hint">Changes are written to the gateway's <code>.env</code> file and require an application restart.</p>
+  <p class="warning">Use only on a trusted network. Authenticate with the current <code>GATEWAY_API_KEY</code>. Configured secrets are never loaded into the page; leave a secret blank to keep it, or select Clear to remove an optional secret. A newly generated gateway key is shown once so you can copy it before saving.</p>
+  <section class="panel">
+    <div class="auth">
+      <label for="admin-key">Admin bearer key
+        <input id="admin-key" type="password" autocomplete="current-password">
+      </label>
+      <button id="load" type="button">Load settings</button>
+    </div>
+    <p class="hint">The key is kept in this tab's session storage only.</p>
+  </section>
+  <form id="settings-form" hidden>
+    <div id="fields"></div>
+    <button type="submit">Save settings</button>
+  </form>
+  <p id="message" role="status" aria-live="polite"></p>
+  <script>
+    const groups = [
+      ["Gateway server", [
+        ["gateway_bind_address", "Bind address", "text", "Address for native Gateway startup. In Docker Compose, this is the host-side published address."],
+        ["gateway_port", "Port", "number", "Port for native Gateway startup. In Docker Compose, this is the host-side published port."]
+      ]],
+      ["Gateway authentication", [
+        ["gateway_api_key", "Gateway API key", "secret", "Current key is hidden. Enter a replacement only to rotate it."],
+        ["api_key_registry", "API key registry (JSON)", "json", "Map SHA-256 bearer-key hashes to arrays of allowed tenant IDs."]
+      ]],
+      ["MongoDB Atlas and embeddings", [
+        ["mongodb_uri", "MongoDB URI", "secret", "Atlas connection string; stored in .env with restrictive file permissions."],
+        ["mongodb_api_model_endpoint", "MongoDB AI API endpoint", "text"],
+        ["mongodb_api_key", "MongoDB AI API key", "secret"],
+        ["mongodb_database", "Database", "text"],
+        ["mongodb_collection", "Collection", "text"],
+        ["atlas_vector_index", "Vector Search index", "text"],
+        ["voyage_embedding_model", "Embedding model", "text"],
+        ["embedding_dimensions", "Embedding dimensions", "number"],
+        ["embedding_batch_size", "Embedding batch size", "number"]
+      ]],
+      ["Ollama and chat", [
+        ["ollama_base_url", "Ollama base URL", "text"],
+        ["ollama_model", "Ollama model", "text"],
+        ["public_model_name", "Public model name", "text"]
+      ]],
+      ["Retrieval and chunking", [
+        ["default_tenant_id", "Default tenant ID", "text"],
+        ["chunk_size", "Chunk size", "number"],
+        ["chunk_overlap", "Chunk overlap", "number"],
+        ["retrieval_top_k", "Retrieval top K", "number"],
+        ["retrieval_num_candidates", "Retrieval candidate count", "number"],
+        ["retrieval_min_score", "Minimum retrieval score", "number"],
+        ["max_document_chars", "Maximum document characters", "number"],
+        ["max_query_chars", "Maximum query characters", "number"],
+        ["upstream_timeout_seconds", "Upstream timeout (seconds)", "number"]
+      ]],
+      ["Document loader", [
+        ["document_loader_enabled", "Enable document loader", "boolean"],
+        ["document_loader_roots", "Allowed document roots (JSON array)", "json"],
+        ["document_loader_max_active_jobs", "Maximum active jobs", "number"],
+        ["document_parser_model", "Parser model", "text"],
+        ["document_parser_timeout_seconds", "Parser timeout (seconds)", "number"]
+      ]]
+    ];
+    const secretFields = new Set(["gateway_api_key", "mongodb_uri", "mongodb_api_key"]);
+    const fields = document.querySelector("#fields");
+    const form = document.querySelector("#settings-form");
+    const message = document.querySelector("#message");
+    const keyInput = document.querySelector("#admin-key");
+    keyInput.value = sessionStorage.getItem("gateway-admin-key") || "";
+
+    function requestHeaders() {
+      return {
+        "Authorization": `Bearer ${keyInput.value}`,
+        "Content-Type": "application/json"
+      };
+    }
+
+    function showMessage(text, isError = false) {
+      message.textContent = text;
+      message.style.color = isError ? "#c33" : "";
+    }
+
+    function makeField(name, labelText, type, help, value, secretConfigured) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "field";
+      const label = document.createElement("label");
+      label.htmlFor = `field-${name}`;
+      label.append(document.createTextNode(labelText));
+      let input;
+      if (type === "json") {
+        input = document.createElement("textarea");
+        input.value = JSON.stringify(value, null, 2);
+      } else {
+        input = document.createElement("input");
+        input.type = type === "boolean" ? "checkbox" : type;
+        if (type === "boolean") input.checked = value;
+        else if (type === "number") {
+          input.step = "any";
+          input.value = value ?? "";
+        } else if (type !== "secret") input.value = value ?? "";
+        else input.placeholder = secretConfigured ? "Configured; blank keeps current value" : "Not configured";
+      }
+      input.id = `field-${name}`;
+      input.dataset.name = name;
+      label.append(input);
+      wrapper.append(label);
+      if (help) {
+        const note = document.createElement("small");
+        note.textContent = help;
+        wrapper.append(note);
+      }
+      if (type === "secret") {
+        if (name === "gateway_api_key") {
+          const actions = document.createElement("div");
+          actions.className = "secret-actions";
+          const generate = document.createElement("button");
+          generate.type = "button";
+          generate.textContent = "Generate new GATEWAY_API_KEY";
+          generate.addEventListener("click", async () => {
+            generate.disabled = true;
+            try {
+              const response = await fetch("/v1/admin/environment/gateway-api-key", {
+                method: "POST",
+                headers: requestHeaders(),
+                cache: "no-store"
+              });
+              const result = await response.json();
+              if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`);
+              input.value = result.gateway_api_key;
+              input.type = "text";
+              input.select();
+              showMessage("New key generated. Copy it now; it will be hidden after saving and cannot be retrieved again.");
+            } catch (error) {
+              showMessage(error.message, true);
+            } finally {
+              generate.disabled = false;
+            }
+          });
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "secondary";
+          copy.textContent = "Copy key";
+          copy.addEventListener("click", async () => {
+            if (!input.value) {
+              showMessage("Generate a new key first.", true);
+              return;
+            }
+            try {
+              await navigator.clipboard.writeText(input.value);
+              showMessage("Generated key copied to clipboard.");
+            } catch {
+              input.focus();
+              input.select();
+              showMessage("Clipboard access is unavailable; the generated key is selected for manual copying.");
+            }
+          });
+          actions.append(generate, copy);
+          wrapper.append(actions);
+          const oneTime = document.createElement("small");
+          oneTime.textContent = "A generated key is shown once in this field. Copy it before saving; the server does not store generated keys until you save.";
+          wrapper.append(oneTime);
+        }
+        const clearLabel = document.createElement("label");
+        clearLabel.className = "secret-clear";
+        const clear = document.createElement("input");
+        clear.type = "checkbox";
+        clear.dataset.clearSecret = name;
+        clearLabel.append(clear, document.createTextNode(" Clear this secret"));
+        wrapper.append(clearLabel);
+        const status = document.createElement("small");
+        status.textContent = secretConfigured ? "A value is currently configured." : "No value is currently configured.";
+        wrapper.append(status);
+      }
+      return wrapper;
+    }
+
+    function render(data) {
+      fields.replaceChildren();
+      for (const [groupName, definitions] of groups) {
+        const section = document.createElement("fieldset");
+        const legend = document.createElement("legend");
+        legend.textContent = groupName;
+        section.append(legend);
+        for (const [name, label, type, help] of definitions) {
+          section.append(makeField(
+            name, label, type, help,
+            data.settings[name], data.secrets_configured[name]
+          ));
+        }
+        fields.append(section);
+      }
+      form.hidden = false;
+    }
+
+    document.querySelector("#load").addEventListener("click", async () => {
+      keyInput.value = keyInput.value.trim();
+      sessionStorage.setItem("gateway-admin-key", keyInput.value);
+      showMessage("Loading settings...");
+      try {
+        const response = await fetch("/v1/admin/environment", { headers: requestHeaders() });
+        const data = await response.json();
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error("GATEWAY_API_KEY was rejected. Use the key currently loaded by the running Gateway; restart after rotating it. A process-manager environment variable overrides the value in .env.");
+          }
+          throw new Error(data.detail || `Request failed (${response.status})`);
+        }
+        render(data);
+        showMessage("Settings loaded.");
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    });
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const settings = {};
+      const secrets = {};
+      const clearSecrets = [];
+      for (const input of fields.querySelectorAll("[data-name]")) {
+        const name = input.dataset.name;
+        if (secretFields.has(name)) {
+          if (input.value) secrets[name] = input.value;
+          continue;
+        }
+        if (input.type === "checkbox") settings[name] = input.checked;
+        else if (input.type === "number") settings[name] = Number(input.value);
+        else if (input.tagName === "TEXTAREA") {
+          try {
+            settings[name] = JSON.parse(input.value);
+          } catch {
+            showMessage(`${name} must contain valid JSON.`, true);
+            input.focus();
+            return;
+          }
+        } else settings[name] = input.value;
+      }
+      for (const input of fields.querySelectorAll("[data-clear-secret]")) {
+        if (input.checked) clearSecrets.push(input.dataset.clearSecret);
+      }
+      showMessage("Saving settings...");
+      try {
+        const response = await fetch("/v1/admin/environment", {
+          method: "PUT",
+          headers: requestHeaders(),
+          body: JSON.stringify({ settings, secrets, clear_secrets: clearSecrets })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(
+          typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)
+        );
+        if (secrets.gateway_api_key) {
+          keyInput.value = secrets.gateway_api_key;
+          sessionStorage.setItem("gateway-admin-key", secrets.gateway_api_key);
+          secrets.gateway_api_key = "";
+        }
+        render(data);
+        showMessage("Saved to .env. Restart the gateway process to apply the new configuration.");
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    });
+  </script>
+</body>
+</html>

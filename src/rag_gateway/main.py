@@ -1,18 +1,33 @@
 import asyncio
 import json
 import logging
+import os
+import secrets
+import shutil
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pymongo.errors import PyMongoError
 from starlette.concurrency import run_in_threadpool
@@ -21,14 +36,16 @@ from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from rag_gateway.chunking import chunk_text
 from rag_gateway.config import Settings, get_settings
 from rag_gateway.document_loader import (
-    IngestDocument as ParsedDocument,
-)
-from rag_gateway.document_loader import (
+    MAX_SOURCE_FILE_BYTES,
     LoaderOptions,
     OllamaDocumentParser,
     load_directory,
     normalize_extensions,
 )
+from rag_gateway.document_loader import (
+    IngestDocument as ParsedDocument,
+)
+from rag_gateway.environment import SECRET_FIELDS, save_settings, settings_response
 from rag_gateway.models import DocumentLoaderRequest, IngestDocument, IngestResult
 from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
@@ -37,6 +54,8 @@ from rag_gateway.voyage import VoyageEmbedder
 bearer_scheme = HTTPBearer(auto_error=False)
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
+MAX_UPLOAD_FILES = 500
+MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
 
 
 def _host_label(url: str) -> str:
@@ -109,6 +128,16 @@ async def _check_mongodb_ai_model_api(settings: Settings, client: httpx.AsyncCli
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    logger.info(
+        "Gateway authentication configuration: cwd=%s dotenv=%s dotenv_exists=%s "
+        "gateway_key_configured=%s process_env_override=%s registry_entries=%s",
+        Path.cwd(),
+        Path.cwd() / ".env",
+        (Path.cwd() / ".env").is_file(),
+        bool(settings.gateway_api_key),
+        "GATEWAY_API_KEY" in os.environ,
+        len(settings.api_key_registry),
+    )
     app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout_seconds)
     app.state.store = None
     app.state.document_loader_jobs = {}
@@ -131,6 +160,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings.mongodb_database,
                 settings.mongodb_collection,
             )
+            try:
+                index_exists, index_queryable = await run_in_threadpool(
+                    app.state.store.vector_index_status
+                )
+                if index_exists and index_queryable:
+                    logger.info(
+                        "Atlas Vector Search index is ready: name=%s",
+                        settings.atlas_vector_index,
+                    )
+                elif index_exists:
+                    logger.warning(
+                        "Atlas Vector Search index exists but is not queryable yet: name=%s",
+                        settings.atlas_vector_index,
+                    )
+                else:
+                    logger.warning(
+                        "Atlas Vector Search index was not found: name=%s",
+                        settings.atlas_vector_index,
+                    )
+            except PyMongoError as error:
+                logger.warning(
+                    "Atlas Vector Search index check failed: name=%s error=%s",
+                    settings.atlas_vector_index,
+                    type(error).__name__,
+                )
+            try:
+                tenant_ids = await run_in_threadpool(app.state.store.list_tenant_ids)
+                if tenant_ids:
+                    logger.info(
+                        "Atlas collection tenants: %s",
+                        ", ".join(tenant_ids),
+                    )
+                else:
+                    logger.warning("Atlas collection has no tenant_id values")
+            except PyMongoError as error:
+                logger.warning(
+                    "Atlas tenant listing failed: collection=%s error=%s",
+                    settings.mongodb_collection,
+                    type(error).__name__,
+                )
         except PyMongoError as error:
             logger.error("Atlas store initialization failed (%s): %s", type(error).__name__, error)
             logger.debug("Atlas store initialization details", exc_info=error)
@@ -247,6 +316,38 @@ def require_api_key(
     return None
 
 
+def require_tool_api_key(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    settings: Settings = Depends(get_settings),
+) -> list[str] | None:
+    if (
+        credentials is not None
+        and settings.gateway_api_key
+        and compare_digest(
+            sha256(credentials.credentials.encode()).digest(),
+            sha256(settings.gateway_api_key.encode()).digest(),
+        )
+    ):
+        return None
+    return require_api_key(credentials, settings)
+
+
+def require_environment_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    if not settings.gateway_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="GATEWAY_API_KEY must be configured to administer environment settings",
+        )
+    if credentials is None or not compare_digest(
+        sha256(credentials.credentials.encode()).digest(),
+        sha256(settings.gateway_api_key.encode()).digest(),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing admin bearer token")
+
+
 def get_store(request: Request) -> AtlasStore:
     store = getattr(request.app.state, "store", None)
     if store is None:
@@ -274,6 +375,91 @@ def get_tenant_id(
 @app.get("/healthz")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def welcome_page() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "welcome.html")
+
+
+@app.get("/v1/status", include_in_schema=False)
+async def gateway_status(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "status": "ready",
+        "application": {"status": "ok", "version": app.version},
+        "atlas": {"status": "not_configured"},
+        "vector_index": {"status": "unknown", "name": settings.atlas_vector_index},
+        "ollama": {
+            "status": "unknown",
+            "endpoint": _host_label(settings.ollama_base_url),
+            "model": settings.ollama_model,
+        },
+        "mongodb_ai_api": {
+            "status": "configured" if settings.mongodb_api_key else "not_configured",
+            "endpoint": _host_label(settings.mongodb_api_model_endpoint),
+            "model": settings.voyage_embedding_model,
+        },
+        "authentication": {
+            "status": "configured"
+            if settings.gateway_api_key or settings.api_key_registry
+            else "not_configured"
+        },
+    }
+
+    store = getattr(request.app.state, "store", None)
+    if store is not None:
+        try:
+            await run_in_threadpool(store.ping)
+            status["atlas"] = {"status": "connected"}
+            index_exists, index_queryable = await run_in_threadpool(store.vector_index_status)
+            status["vector_index"]["status"] = (
+                "ready" if index_exists and index_queryable else
+                "building" if index_exists else "missing"
+            )
+        except PyMongoError as error:
+            status["atlas"] = {"status": "error", "error": type(error).__name__}
+            status["vector_index"]["status"] = "unavailable"
+            logger.warning("Gateway status Atlas check failed (%s)", type(error).__name__)
+    else:
+        status["atlas"] = {"status": "not_configured"}
+        status["vector_index"]["status"] = "unavailable"
+
+    parser = OllamaDocumentParser(
+        settings.ollama_base_url,
+        settings.ollama_model,
+        min(settings.document_parser_timeout_seconds, settings.upstream_timeout_seconds),
+    )
+    try:
+        models = await asyncio.to_thread(parser.list_models)
+        matching_model = any(
+            model.casefold() == settings.ollama_model.casefold() for model in models
+        )
+        status["ollama"]["status"] = "connected" if matching_model else "model_missing"
+        status["ollama"]["models_discovered"] = len(models)
+    except (httpx.HTTPError, ValueError) as error:
+        status["ollama"].update({"status": "error", "error": type(error).__name__})
+        logger.warning("Gateway status Ollama check failed (%s)", type(error).__name__)
+    finally:
+        parser.close()
+
+    components = (
+        status["atlas"]["status"] == "connected",
+        status["vector_index"]["status"] == "ready",
+        status["ollama"]["status"] == "connected",
+        status["mongodb_ai_api"]["status"] == "configured",
+        bool(settings.gateway_api_key or settings.api_key_registry),
+    )
+    if not all(components):
+        status["status"] = (
+            "not_ready"
+            if status["atlas"]["status"] in {"not_configured", "error"}
+            or status["vector_index"]["status"] in {"missing", "unavailable"}
+            else "degraded"
+        )
+    return status
 
 
 @app.get("/readyz")
@@ -305,12 +491,98 @@ async def document_loader_ui(settings: Settings = Depends(get_settings)) -> File
     return FileResponse(Path(__file__).parent / "static" / "document_loader.html")
 
 
+@app.get("/tools/environment", include_in_schema=False)
+async def environment_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "environment.html")
+
+
+@app.get("/tools/chunks", include_in_schema=False)
+async def chunks_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "chunks.html")
+
+
+@app.get("/v1/admin/environment")
+async def read_environment(
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    try:
+        return settings_response(Settings())
+    except (OSError, ValueError) as error:
+        logger.exception("Could not read environment configuration")
+        raise HTTPException(status_code=500, detail="Could not read environment configuration") from error
+
+
+@app.post("/v1/admin/environment/gateway-api-key")
+async def generate_gateway_api_key(
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, str]:
+    return {"gateway_api_key": secrets.token_urlsafe(48)}
+
+
+@app.put("/v1/admin/environment")
+async def update_environment(
+    body: dict[str, Any],
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    settings_updates = body.get("settings", {})
+    secrets = body.get("secrets", {})
+    clear_secrets = body.get("clear_secrets", [])
+    if not isinstance(settings_updates, dict) or not isinstance(secrets, dict):
+        raise HTTPException(status_code=422, detail="'settings' and 'secrets' must be objects")
+    if not isinstance(clear_secrets, list) or not all(
+        isinstance(field, str) for field in clear_secrets
+    ):
+        raise HTTPException(status_code=422, detail="'clear_secrets' must be an array of names")
+
+    allowed_settings = set(Settings.model_fields) - SECRET_FIELDS
+    unknown_settings = set(settings_updates) - allowed_settings
+    unknown_secrets = set(secrets) - SECRET_FIELDS
+    invalid_clear_secrets = set(clear_secrets) - SECRET_FIELDS
+    if unknown_settings or unknown_secrets or invalid_clear_secrets:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "unknown_settings": sorted(unknown_settings),
+                "unknown_secrets": sorted(unknown_secrets),
+                "invalid_clear_secrets": sorted(invalid_clear_secrets),
+            },
+        )
+    if any(not isinstance(value, str) for value in secrets.values()):
+        raise HTTPException(status_code=422, detail="Secret values must be strings")
+
+    candidate_values = Settings().model_dump()
+    candidate_values.update(settings_updates)
+    for field, value in secrets.items():
+        if value:
+            candidate_values[field] = value
+    for field in clear_secrets:
+        candidate_values[field] = ""
+
+    try:
+        updated_settings = Settings.model_validate(candidate_values)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not updated_settings.gateway_api_key:
+        raise HTTPException(
+            status_code=422,
+            detail="GATEWAY_API_KEY cannot be cleared while environment administration is enabled",
+        )
+
+    try:
+        saved_path = save_settings(updated_settings)
+    except OSError as error:
+        logger.exception("Could not persist environment configuration")
+        raise HTTPException(status_code=500, detail="Could not persist environment configuration") from error
+    logger.info("Environment configuration saved to %s; restart required to apply changes", saved_path)
+    return {"saved": True, "restart_required": True, **settings_response(updated_settings)}
+
+
 @app.get("/v1/document-loader/models")
 async def list_document_parser_models(
     settings: Settings = Depends(get_settings),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> dict[str, Any]:
-    require_api_key(credentials, settings)
+    require_tool_api_key(credentials, settings)
     _require_document_loader(settings)
     parser = OllamaDocumentParser(
         settings.ollama_base_url,
@@ -326,36 +598,27 @@ async def list_document_parser_models(
     return {"configured_model": settings.document_parser_model, "models": models}
 
 
-@app.post("/v1/document-loader/jobs", status_code=202)
-async def start_document_loader_job(
-    body: DocumentLoaderRequest,
+async def _queue_document_loader_job(
+    *,
+    directory: Path,
+    tenant_id: str,
+    recursive: bool,
+    include_extensions: frozenset[str] | None,
+    exclude_extensions: frozenset[str],
+    model: str | None,
     request: Request,
-    allowed_tenants: list[str] | None = Depends(require_api_key),
-    settings: Settings = Depends(get_settings),
-    store: AtlasStore = Depends(get_store),
-    embedder: VoyageEmbedder = Depends(get_embedder),
+    settings: Settings,
+    store: AtlasStore,
+    embedder: VoyageEmbedder,
+    cleanup_directory: bool = False,
 ) -> dict[str, Any]:
-    _require_document_loader(settings)
-    if allowed_tenants is not None and body.tenant_id not in allowed_tenants:
-        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
-    directory = _resolve_loader_directory(body.directory, settings.document_loader_roots)
-    try:
-        include_extensions = normalize_extensions(body.include_extensions)
-        exclude_extensions = (
-            normalize_extensions(body.exclude_extensions, validate_supported=False)
-            if body.exclude_extensions
-            else ()
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-
     tasks: set[asyncio.Task[Any]] = request.app.state.document_loader_tasks
     if sum(not task.done() for task in tasks) >= settings.document_loader_max_active_jobs:
         raise HTTPException(status_code=429, detail="Maximum active document-loader jobs reached")
 
     parser = OllamaDocumentParser(
         settings.ollama_base_url,
-        body.model or settings.document_parser_model,
+        model or settings.document_parser_model,
         settings.document_parser_timeout_seconds,
     )
     try:
@@ -364,7 +627,7 @@ async def start_document_loader_job(
         parser.close()
         raise HTTPException(status_code=502, detail=f"Could not query Ollama: {error}") from error
     matching_model = next(
-        (model for model in available_models if model.casefold() == parser.model.casefold()),
+        (available for available in available_models if available.casefold() == parser.model.casefold()),
         None,
     )
     if matching_model is None:
@@ -379,8 +642,8 @@ async def start_document_loader_job(
     job: dict[str, Any] = {
         "job_id": job_id,
         "status": "queued",
-        "directory": str(directory),
-        "tenant_id": body.tenant_id,
+        "directory": "browser upload" if cleanup_directory else str(directory),
+        "tenant_id": tenant_id,
         "model": parser.model,
         "discovered": 0,
         "eligible": 0,
@@ -421,8 +684,8 @@ async def start_document_loader_job(
             summary = await load_directory(
                 LoaderOptions(
                     directory=directory,
-                    tenant_id=body.tenant_id,
-                    recursive=body.recursive,
+                    tenant_id=tenant_id,
+                    recursive=recursive,
                     include_extensions=include_extensions,
                     exclude_extensions=exclude_extensions,
                 ),
@@ -432,8 +695,8 @@ async def start_document_loader_job(
                 settings.max_document_chars,
             )
             job.update(asdict(summary))
-            job["directory"] = str(directory)
-            job["tenant_id"] = body.tenant_id
+            job["directory"] = "browser upload" if cleanup_directory else str(directory)
+            job["tenant_id"] = tenant_id
             job["model"] = parser.model
             job["events"] = job["events"][-250:]
         except Exception as error:  # noqa: BLE001
@@ -443,6 +706,8 @@ async def start_document_loader_job(
             job["events"].append({"stage": "failed", "message": str(error)})
         finally:
             parser.close()
+            if cleanup_directory:
+                await asyncio.to_thread(shutil.rmtree, directory, True)
 
     task = asyncio.create_task(run_job())
     tasks.add(task)
@@ -450,11 +715,163 @@ async def start_document_loader_job(
     return {"job_id": job_id, "status": job["status"], "status_url": f"/v1/document-loader/jobs/{job_id}"}
 
 
+@app.post("/v1/document-loader/jobs", status_code=202)
+async def start_document_loader_job(
+    body: DocumentLoaderRequest,
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    settings: Settings = Depends(get_settings),
+    store: AtlasStore = Depends(get_store),
+    embedder: VoyageEmbedder = Depends(get_embedder),
+) -> dict[str, Any]:
+    _require_document_loader(settings)
+    if allowed_tenants is not None and body.tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    directory = _resolve_loader_directory(body.directory, settings.document_loader_roots)
+    try:
+        include_extensions = normalize_extensions(body.include_extensions)
+        exclude_extensions = (
+            normalize_extensions(body.exclude_extensions, validate_supported=False)
+            if body.exclude_extensions
+            else ()
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return await _queue_document_loader_job(
+        directory=directory,
+        tenant_id=body.tenant_id,
+        recursive=body.recursive,
+        include_extensions=include_extensions,
+        exclude_extensions=exclude_extensions,
+        model=body.model,
+        request=request,
+        settings=settings,
+        store=store,
+        embedder=embedder,
+    )
+
+
+@app.post("/v1/document-loader/uploads", status_code=202)
+async def upload_document_loader_files(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    relative_paths: str = Form(default="[]"),
+    tenant_id: str = Form(default="default", min_length=1, max_length=256),
+    model: str = Form(default=""),
+    include_extensions: str = Form(default=""),
+    exclude_extensions: str = Form(default=""),
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    settings: Settings = Depends(get_settings),
+    store: AtlasStore = Depends(get_store),
+    embedder: VoyageEmbedder = Depends(get_embedder),
+) -> dict[str, Any]:
+    _require_document_loader(settings)
+    if allowed_tenants is not None and tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    tasks: set[asyncio.Task[Any]] = request.app.state.document_loader_tasks
+    if sum(not task.done() for task in tasks) >= settings.document_loader_max_active_jobs:
+        raise HTTPException(status_code=429, detail="Maximum active document-loader jobs reached")
+    if not files:
+        raise HTTPException(status_code=422, detail="Select at least one file")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail=f"Upload is limited to {MAX_UPLOAD_FILES} files")
+    try:
+        submitted_paths = json.loads(relative_paths)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="relative_paths must be a JSON array") from error
+    if (
+        not isinstance(submitted_paths, list)
+        or len(submitted_paths) != len(files)
+        or not all(isinstance(path, str) for path in submitted_paths)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="relative_paths must contain one path for each uploaded file",
+        )
+    try:
+        include_filter = normalize_extensions(
+            [extension for extension in include_extensions.split(",") if extension.strip()]
+            if include_extensions.strip()
+            else None
+        )
+        exclude_filter = (
+            normalize_extensions(
+                [extension for extension in exclude_extensions.split(",") if extension.strip()],
+                validate_supported=False,
+            )
+            if exclude_extensions.strip()
+            else frozenset()
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    temporary_directory = Path(tempfile.mkdtemp(prefix="rag-gateway-upload-"))
+    total_bytes = 0
+    seen_paths: set[str] = set()
+    try:
+        for upload, submitted_path in zip(files, submitted_paths, strict=True):
+            normalized_path = submitted_path.replace("\\", "/")
+            relative_path = PurePosixPath(normalized_path)
+            if (
+                not normalized_path
+                or relative_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in normalized_path.split("/"))
+                or "\x00" in normalized_path
+                or len(normalized_path) > 512
+            ):
+                raise HTTPException(status_code=422, detail="Upload contains an invalid relative path")
+            normalized_key = relative_path.as_posix()
+            if normalized_key in seen_paths:
+                raise HTTPException(status_code=422, detail="Upload contains duplicate relative paths")
+            seen_paths.add(normalized_key)
+            destination = temporary_directory.joinpath(*relative_path.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            file_bytes = 0
+            with destination.open("wb") as destination_file:
+                while chunk := await upload.read(1024 * 1024):
+                    file_bytes += len(chunk)
+                    total_bytes += len(chunk)
+                    if file_bytes > MAX_SOURCE_FILE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"{normalized_key} exceeds the 50 MiB per-file limit",
+                        )
+                    if total_bytes > MAX_UPLOAD_TOTAL_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="Upload exceeds the 200 MiB total limit",
+                        )
+                    await asyncio.to_thread(destination_file.write, chunk)
+            await upload.close()
+    except BaseException:
+        await asyncio.to_thread(shutil.rmtree, temporary_directory, True)
+        raise
+
+    try:
+        return await _queue_document_loader_job(
+            directory=temporary_directory,
+            tenant_id=tenant_id,
+            recursive=True,
+            include_extensions=include_filter,
+            exclude_extensions=exclude_filter,
+            model=model or None,
+            request=request,
+            settings=settings,
+            store=store,
+            embedder=embedder,
+            cleanup_directory=True,
+        )
+    except BaseException:
+        await asyncio.to_thread(shutil.rmtree, temporary_directory, True)
+        raise
+
+
 @app.get("/v1/document-loader/jobs/{job_id}")
 async def get_document_loader_job(
     job_id: str,
     request: Request,
-    allowed_tenants: list[str] | None = Depends(require_api_key),
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
 ) -> dict[str, Any]:
     job = _job_for_tenant(job_id, request.app.state.document_loader_jobs, allowed_tenants)
     return dict(job)
@@ -473,6 +890,51 @@ async def list_models(settings: Settings = Depends(get_settings)) -> dict[str, A
             }
         ],
     }
+
+
+@app.get("/v1", dependencies=[Depends(require_api_key)])
+async def api_root(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return {
+        "object": "gateway",
+        "name": app.title,
+        "model": settings.public_model_name,
+        "models_url": "/v1/models",
+        "ollama_models_url": "/v1/api/tags",
+        "chat_completions_url": "/v1/chat/completions",
+    }
+
+
+@app.get("/v1/api/tags", dependencies=[Depends(require_api_key)])
+async def list_ollama_compatible_models(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    model_name = settings.public_model_name
+    return {
+        "models": [
+            {
+                "name": model_name,
+                "model": model_name,
+                "modified_at": "1970-01-01T00:00:00Z",
+                "size": 0,
+                "digest": "",
+                "details": {
+                    "format": "api",
+                    "family": "rag-gateway",
+                    "families": [],
+                    "parameter_size": "remote",
+                    "quantization_level": "n/a",
+                },
+            }
+        ]
+    }
+
+
+@app.get("/v1/api/ps", dependencies=[Depends(require_api_key)])
+async def list_ollama_running_models() -> dict[str, list[Any]]:
+    return {"models": []}
+
+
+@app.get("/v1/api/version", dependencies=[Depends(require_api_key)])
+async def ollama_compatible_version() -> dict[str, str]:
+    return {"version": app.version}
 
 
 @app.post("/v1/ingest", response_model=IngestResult)
@@ -522,6 +984,58 @@ async def delete_document(
     return {"deleted_chunks": deleted}
 
 
+@app.get("/v1/chunks/tenants")
+async def list_chunk_tenants(
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    store: AtlasStore = Depends(get_store),
+) -> dict[str, Any]:
+    statistics = await run_in_threadpool(store.list_tenant_statistics, allowed_tenants)
+    return {"tenants": statistics}
+
+
+@app.get("/v1/chunks/documents")
+async def list_chunk_documents(
+    tenant_id: str,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    store: AtlasStore = Depends(get_store),
+) -> dict[str, Any]:
+    if not tenant_id or len(tenant_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid tenant ID")
+    if allowed_tenants is not None and tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    documents = await run_in_threadpool(store.list_documents, tenant_id)
+    return {"tenant_id": tenant_id, "documents": documents}
+
+
+@app.delete("/v1/chunks/documents/{document_id:path}")
+async def delete_chunk_document(
+    document_id: str,
+    tenant_id: str,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    store: AtlasStore = Depends(get_store),
+) -> dict[str, int]:
+    if not tenant_id or len(tenant_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid tenant ID")
+    if allowed_tenants is not None and tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    deleted = await run_in_threadpool(store.delete_document, tenant_id, document_id)
+    return {"deleted_chunks": deleted}
+
+
+@app.delete("/v1/chunks/tenant")
+async def delete_chunk_tenant(
+    tenant_id: str,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    store: AtlasStore = Depends(get_store),
+) -> dict[str, int]:
+    if not tenant_id or len(tenant_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid tenant ID")
+    if allowed_tenants is not None and tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    deleted = await run_in_threadpool(store.delete_tenant, tenant_id)
+    return {"deleted_chunks": deleted}
+
+
 @app.post("/v1/retrieve")
 async def retrieve(
     body: dict[str, Any],
@@ -562,6 +1076,93 @@ def _chat_payload(body: dict[str, Any], messages: list[dict[str, Any]], settings
     }
     payload.update({key: body[key] for key in forwarded_keys if key in body})
     return payload
+
+
+def _ollama_chat_body(body: dict[str, Any]) -> dict[str, Any]:
+    options = body.get("options")
+    options = options if isinstance(options, dict) else {}
+    payload: dict[str, Any] = {
+        "messages": body.get("messages"),
+        "stream": body.get("stream", True),
+    }
+    option_mapping = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "num_predict": "max_tokens",
+        "stop": "stop",
+        "seed": "seed",
+    }
+    payload.update(
+        {
+            target: options[source]
+            for source, target in option_mapping.items()
+            if source in options
+        }
+    )
+    if body.get("format") == "json":
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def _ollama_chat_result(result: dict[str, Any], model: str) -> dict[str, Any]:
+    choices = result.get("choices", [])
+    choice = choices[0] if choices else {}
+    message = choice.get("message", {})
+    response: dict[str, Any] = {
+        "model": model,
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "message": {
+            "role": message.get("role", "assistant"),
+            "content": message.get("content", ""),
+        },
+        "done": True,
+        "done_reason": choice.get("finish_reason"),
+    }
+    if "sources" in result:
+        response["sources"] = result["sources"]
+    return response
+
+
+async def _ollama_chat_stream(response: StreamingResponse, model: str) -> AsyncIterator[bytes]:
+    created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    buffer = b""
+    async for chunk in response.body_iterator:
+        buffer += chunk.encode() if isinstance(chunk, str) else chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            if line.startswith(b"data: "):
+                event = line[6:]
+                if event == b"[DONE]":
+                    yield (
+                        json.dumps(
+                            {
+                                "model": model,
+                                "created_at": created_at,
+                                "message": {"role": "assistant", "content": ""},
+                                "done": True,
+                            }
+                        )
+                        + "\n"
+                    ).encode()
+                    return
+                chunk_data = json.loads(event)
+                if "error" in chunk_data:
+                    yield (json.dumps(chunk_data) + "\n").encode()
+                    continue
+                choice = (chunk_data.get("choices") or [{}])[0]
+                delta = choice.get("delta", {})
+                ollama_chunk: dict[str, Any] = {
+                    "model": model,
+                    "created_at": created_at,
+                    "message": {
+                        "role": delta.get("role", "assistant"),
+                        "content": delta.get("content", ""),
+                    },
+                    "done": choice.get("finish_reason") is not None,
+                }
+                if "sources" in chunk_data:
+                    ollama_chunk["sources"] = chunk_data["sources"]
+                yield (json.dumps(ollama_chunk) + "\n").encode()
 
 
 @app.post("/v1/chat/completions")
@@ -614,6 +1215,38 @@ async def chat_completions(
         for index, source in enumerate(sources, start=1)
     ]
     return JSONResponse(content=result)
+
+
+@app.post("/v1/api/chat")
+async def ollama_compatible_chat(
+    body: dict[str, Any],
+    request: Request,
+    x_tenant_id: str | None = Header(default=None),
+    allowed_tenants: list[str] | None = Depends(require_api_key),
+    settings: Settings = Depends(get_settings),
+    store: AtlasStore = Depends(get_store),
+    embedder: VoyageEmbedder = Depends(get_embedder),
+) -> Response:
+    chat_body = _ollama_chat_body(body)
+    if not isinstance(chat_body["messages"], list) or not chat_body["messages"]:
+        raise HTTPException(status_code=422, detail="messages must be a non-empty array")
+    response = await chat_completions(
+        chat_body,
+        request,
+        x_tenant_id,
+        allowed_tenants,
+        settings,
+        store,
+        embedder,
+    )
+    if isinstance(response, StreamingResponse):
+        return StreamingResponse(
+            _ollama_chat_stream(response, settings.public_model_name),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    result = json.loads(response.body)
+    return JSONResponse(content=_ollama_chat_result(result, settings.public_model_name))
 
 
 async def _stream_completion(

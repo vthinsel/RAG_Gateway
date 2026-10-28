@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas RAG Gateway</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --red: #a63d35;
+      --yellow: #f0c663;
+      font: 15px/1.5 "Segoe UI", "Aptos", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); }
+    header { background: #153b3e; color: #f6f8f3; padding: 32px max(20px, calc((100vw - 1060px) / 2)); border-bottom: 5px solid var(--yellow); }
+    header h1 { margin: 0; font-size: 30px; }
+    header p { margin: 6px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 26px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; margin-bottom: 18px; }
+    h2 { font-size: 18px; margin: 0 0 14px; }
+    .status-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    #overall { display: inline-block; border-radius: 4px; background: #e8eee9; padding: 4px 10px; font-size: 13px; font-weight: 700; text-transform: uppercase; }
+    #overall.ready { background: #dcefe5; color: var(--green); }
+    #overall.degraded, #overall.not_ready { background: #f8e4df; color: var(--red); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+    .component { border: 1px solid var(--line); border-radius: 5px; padding: 12px; }
+    .component h3 { margin: 0; font-size: 15px; }
+    .component p { margin: 5px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .component .state { font-weight: 700; color: var(--muted); }
+    .component .state.ok { color: var(--green); }
+    .component .state.bad { color: var(--red); }
+    .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .tool { display: block; color: var(--ink); text-decoration: none; border: 1px solid var(--line); border-radius: 5px; padding: 15px; }
+    .tool:hover, .tool:focus { border-color: var(--green); outline: 2px solid #76b8a2; }
+    .tool strong { display: block; color: var(--green); font-size: 16px; }
+    .tool span { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+    button { min-height: 38px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: white; padding: 7px 12px; font: inherit; font-weight: 650; cursor: pointer; }
+    .status-actions { display: flex; align-items: center; gap: 12px; }
+    #checked-at { color: var(--muted); font-size: 12px; }
+    #status-error { min-height: 20px; color: var(--red); margin: 8px 0 0; }
+    @media (max-width: 600px) {
+      header { padding: 24px 18px; }
+      header h1 { font-size: 25px; }
+      main { padding: 0 12px 24px; }
+      section { padding: 15px; }
+      .status-head { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Atlas RAG Gateway</h1>
+    <p>Retrieval-augmented chat, document ingestion, and gateway administration.</p>
+  </header>
+  <main>
+    <section aria-labelledby="status-title">
+      <div class="status-head">
+        <div>
+          <h2 id="status-title">Gateway status</h2>
+          <span id="overall">Checking</span>
+        </div>
+        <div class="status-actions">
+          <span id="checked-at"></span>
+          <button id="refresh" type="button">Refresh status</button>
+        </div>
+      </div>
+      <div id="components" class="grid" aria-live="polite"></div>
+      <p id="status-error" role="status"></p>
+    </section>
+    <section aria-labelledby="tools-title">
+      <h2 id="tools-title">Gateway tools and endpoints</h2>
+      <nav class="tools" aria-label="Gateway tools">
+        <a class="tool" href="/tools/chunks">
+          <strong>Chunks management</strong>
+          <span>Review tenant statistics and documents; remove indexed content.</span>
+        </a>
+        <a class="tool" href="/tools/document-loader">
+          <strong>Document loader</strong>
+          <span>Upload files or folders, or scan an allowed directory on the Gateway host.</span>
+        </a>
+        <a class="tool" href="/tools/environment">
+          <strong>Environment settings</strong>
+          <span>Configure application settings and persist them to the environment file.</span>
+        </a>
+        <a class="tool" href="/docs">
+          <strong>API documentation</strong>
+          <span>Explore the OpenAPI endpoints and request schemas.</span>
+        </a>
+        <a class="tool" href="/healthz">
+          <strong>Liveness endpoint</strong>
+          <span>Check whether the Gateway process is responding.</span>
+        </a>
+        <a class="tool" href="/readyz">
+          <strong>Readiness endpoint</strong>
+          <span>Check whether required configuration and Atlas connectivity are available.</span>
+        </a>
+      </nav>
+    </section>
+  </main>
+  <script>
+    const componentLabels = {
+      application: "Gateway application",
+      atlas: "MongoDB Atlas",
+      vector_index: "Atlas vector index",
+      ollama: "Ollama",
+      mongodb_ai_api: "MongoDB AI Models API",
+      authentication: "Gateway authentication"
+    };
+    const overall = document.querySelector("#overall");
+    const components = document.querySelector("#components");
+    const errorMessage = document.querySelector("#status-error");
+
+    function renderStatus(data) {
+      overall.textContent = data.status.replaceAll("_", " ");
+      overall.className = data.status;
+      components.replaceChildren();
+      for (const [key, label] of Object.entries(componentLabels)) {
+        const info = data[key];
+        const card = document.createElement("article");
+        card.className = "component";
+        const title = document.createElement("h3");
+        title.textContent = label;
+        const state = document.createElement("p");
+        state.className = `state ${["ok", "connected", "ready", "configured"].includes(info.status) ? "ok" : "bad"}`;
+        state.textContent = info.status.replaceAll("_", " ");
+        const details = document.createElement("p");
+        details.textContent = key === "application"
+          ? `Version ${info.version}`
+          : key === "atlas"
+            ? ""
+            : key === "vector_index"
+              ? `Index: ${info.name}`
+              : key === "ollama"
+                ? `${info.endpoint} · ${info.model}${info.models_discovered === undefined ? "" : ` · ${info.models_discovered} model(s) discovered`}`
+                : key === "mongodb_ai_api"
+                  ? `${info.endpoint} · ${info.model}`
+                  : "";
+        card.append(title, state, details);
+        components.append(card);
+      }
+      document.querySelector("#checked-at").textContent = `Checked ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function refreshStatus() {
+      errorMessage.textContent = "";
+      document.querySelector("#refresh").disabled = true;
+      try {
+        const response = await fetch("/v1/status", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `Status check failed (${response.status})`);
+        renderStatus(data);
+      } catch (error) {
+        overall.textContent = "status unavailable";
+        overall.className = "not_ready";
+        errorMessage.textContent = error.message;
+      } finally {
+        document.querySelector("#refresh").disabled = false;
+      }
+    }
+
+    document.querySelector("#refresh").addEventListener("click", refreshStatus);
+    refreshStatus();
+    window.setInterval(refreshStatus, 60000);
+  </script>
+</body>
+</html>

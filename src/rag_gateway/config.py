@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    gateway_bind_address: str = "127.0.0.1"
+    gateway_port: int = Field(default=8000, ge=1, le=65535)
     gateway_api_key: str = ""
     api_key_registry: dict[str, list[str]] = Field(default_factory=dict)
     mongodb_uri: str = ""

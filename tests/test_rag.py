@@ -1,16 +1,26 @@
 import json
 from hashlib import sha256
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
+from starlette.responses import JSONResponse, StreamingResponse
 
+from rag_gateway import main
 from rag_gateway.chunking import chunk_text
-from rag_gateway.config import Settings
-from rag_gateway.main import _stream_completion, app, get_tenant_id, require_api_key
+from rag_gateway.config import Settings, get_settings
+from rag_gateway.main import (
+    _stream_completion,
+    app,
+    get_embedder,
+    get_store,
+    get_tenant_id,
+    require_api_key,
+)
 from rag_gateway.rag import add_rag_system_message, extract_user_query
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder, _token_batches
@@ -174,7 +184,10 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
 
         def aggregate(self, pipeline: list[dict]) -> list[dict]:
             self.pipeline = pipeline
-            return []
+            return [
+                {"document_id": "high-score.md", "score": 0.8},
+                {"document_id": "low-score.md", "score": 0.6},
+            ]
 
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
@@ -184,13 +197,159 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
     )
     store.collection = Collection()
 
-    store.search("tenant-a", [0.1, 0.2], limit=3)
+    results = store.search("tenant-a", [0.1, 0.2], limit=3)
 
     assert store.collection.pipeline is not None
     vector_search = store.collection.pipeline[0]["$vectorSearch"]
     assert vector_search["filter"] == {"tenant_id": {"$eq": "tenant-a"}}
     assert vector_search["limit"] == 3
-    assert store.collection.pipeline[2] == {"$match": {"score": {"$gte": 0.72}}}
+    assert len(store.collection.pipeline) == 2
+    assert [result["document_id"] for result in results] == ["high-score.md"]
+
+
+@pytest.mark.parametrize(
+    ("index_document", "expected"),
+    [
+        ({"queryable": True}, (True, True)),
+        ({"status": "READY"}, (True, True)),
+        ({"status": "BUILDING"}, (True, False)),
+        (None, (False, False)),
+    ],
+)
+def test_vector_index_status(index_document: dict[str, Any] | None, expected: tuple[bool, bool]) -> None:
+    class Collection:
+        def list_search_indexes(self, *, name: str) -> list[dict[str, Any]]:
+            assert name == "test-index"
+            return [index_document] if index_document else []
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(atlas_vector_index="test-index")
+    store.collection = Collection()
+
+    assert store.vector_index_status() == expected
+
+
+def test_list_tenant_ids_returns_sorted_string_ids() -> None:
+    class Collection:
+        def distinct(self, field: str) -> list[Any]:
+            assert field == "tenant_id"
+            return ["lab", "default", None, 42]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.collection = Collection()
+
+    assert store.list_tenant_ids() == ["default", "lab"]
+
+
+def test_chunk_management_store_queries_and_deletes_are_tenant_scoped() -> None:
+    class Collection:
+        pipeline: list[dict] | None = None
+        deleted_filter: dict | None = None
+
+        def aggregate(self, pipeline: list[dict]) -> list[dict]:
+            self.pipeline = pipeline
+            return [{"tenant_id": "tenant-a", "documents": 2, "chunks": 7}]
+
+        def delete_many(self, query: dict) -> SimpleNamespace:
+            self.deleted_filter = query
+            return SimpleNamespace(deleted_count=4)
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.collection = Collection()
+
+    statistics = store.list_tenant_statistics(["tenant-a"])
+    deleted = store.delete_tenant("tenant-a")
+
+    assert statistics == [{"tenant_id": "tenant-a", "documents": 2, "chunks": 7}]
+    assert store.collection.pipeline is not None
+    assert store.collection.pipeline[0]["$match"] == {
+        "tenant_id": {"$type": "string", "$in": ["tenant-a"]}
+    }
+    assert deleted == 4
+    assert store.collection.deleted_filter == {"tenant_id": "tenant-a"}
+
+
+def test_chunk_management_api_enforces_tenant_key_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = "tenant-a-key"
+    settings = Settings(
+        _env_file=None,
+        api_key_registry={sha256(token.encode()).hexdigest(): ["tenant-a"]},
+    )
+
+    class FakeStore:
+        def list_tenant_statistics(self, tenant_ids: list[str] | None) -> list[dict[str, Any]]:
+            return [{"tenant_id": tenant_ids[0], "documents": 1, "chunks": 2}] if tenant_ids else []
+
+        def list_documents(self, tenant_id: str) -> list[dict[str, Any]]:
+            return [{"document_id": "notes/a.md", "chunks": 2}]
+
+        def delete_document(self, tenant_id: str, document_id: str) -> int:
+            assert (tenant_id, document_id) == ("tenant-a", "notes/a.md")
+            return 2
+
+        def delete_tenant(self, tenant_id: str) -> int:
+            assert tenant_id == "tenant-a"
+            return 9
+
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    try:
+        with TestClient(app) as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            page_response = client.get("/tools/chunks")
+            tenants_response = client.get("/v1/chunks/tenants", headers=headers)
+            unauthorized_response = client.get("/v1/chunks/tenants")
+            documents_response = client.get(
+                "/v1/chunks/documents?tenant_id=tenant-a",
+                headers=headers,
+            )
+            delete_document_response = client.delete(
+                "/v1/chunks/documents/notes%2Fa.md?tenant_id=tenant-a",
+                headers=headers,
+            )
+            delete_tenant_response = client.delete(
+                "/v1/chunks/tenant?tenant_id=tenant-a",
+                headers=headers,
+            )
+            denied_response = client.get(
+                "/v1/chunks/documents?tenant_id=tenant-b",
+                headers=headers,
+            )
+
+        assert page_response.status_code == 200
+        assert "RAG chunks management" in page_response.text
+        assert unauthorized_response.status_code == 401
+        assert tenants_response.json()["tenants"] == [
+            {"tenant_id": "tenant-a", "documents": 1, "chunks": 2}
+        ]
+        assert documents_response.json()["documents"][0]["document_id"] == "notes/a.md"
+        assert delete_document_response.json() == {"deleted_chunks": 2}
+        assert delete_tenant_response.json() == {"deleted_chunks": 9}
+        assert denied_response.status_code == 403
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+
+
+def test_vector_search_logs_best_score_when_threshold_filters_all(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Collection:
+        def aggregate(self, _pipeline: list[dict]) -> list[dict]:
+            return [{"document_id": "lab-notes.md", "score": 0.61}]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        atlas_vector_index="test-index",
+        retrieval_num_candidates=50,
+        retrieval_min_score=0.72,
+    )
+    store.collection = Collection()
+
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        assert store.search("tenant-a", [0.1, 0.2], limit=3) == []
+
+    assert "candidates=1 best_score=0.6100 min_score=0.7200" in caplog.text
 
 
 async def test_stream_completion_emits_sources_before_upstream_chunks() -> None:
@@ -230,3 +389,167 @@ def test_health_endpoint() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_welcome_page_and_global_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="test-key",
+        mongodb_api_key="embedding-key",
+        ollama_model="chat:latest",
+    )
+
+    class FakeStore:
+        def ping(self) -> bool:
+            return True
+
+        def vector_index_status(self) -> tuple[bool, bool]:
+            return True, True
+
+        def close(self) -> None:
+            pass
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return ["chat:latest", "glm-ocr:latest"]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    previous_store = getattr(app.state, "store", None)
+    try:
+        with TestClient(app) as client:
+            app.state.store = FakeStore()
+            page_response = client.get("/")
+            status_response = client.get("/v1/status")
+
+        assert page_response.status_code == 200
+        assert "Atlas RAG Gateway" in page_response.text
+        assert "/tools/chunks" in page_response.text
+        assert "/tools/document-loader" in page_response.text
+        assert "/tools/environment" in page_response.text
+        assert status_response.status_code == 200
+        assert status_response.json()["status"] == "ready"
+        assert status_response.json()["atlas"]["status"] == "connected"
+        assert status_response.json()["vector_index"]["status"] == "ready"
+        assert status_response.json()["ollama"]["status"] == "connected"
+        assert "embedding-key" not in status_response.text
+        assert "test-key" not in status_response.text
+    finally:
+        if previous_store is None:
+            del app.state.store
+        else:
+            app.state.store = previous_store
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_v1_root_and_ollama_tags_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None, gateway_api_key="test-key")
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer test-key"}
+        root_response = client.get("/v1", headers=headers)
+        tags_response = client.get("/v1/api/tags", headers=headers)
+        ps_response = client.get("/v1/api/ps", headers=headers)
+        version_response = client.get("/v1/api/version", headers=headers)
+
+    assert root_response.status_code == 200
+    assert root_response.json()["model"] == "rag-local"
+    assert tags_response.status_code == 200
+    model = tags_response.json()["models"][0]
+    assert model["name"] == "rag-local"
+    assert model["model"] == "rag-local"
+    assert ps_response.status_code == 200
+    assert ps_response.json() == {"models": []}
+    assert version_response.status_code == 200
+    assert version_response.json() == {"version": app.version}
+
+
+def test_ollama_api_chat_adapts_non_streaming_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, gateway_api_key="test-key")
+    captured: dict[str, Any] = {}
+
+    async def fake_chat_completions(body: dict[str, Any], *_args: Any) -> JSONResponse:
+        captured.update(body)
+        return JSONResponse(
+            content={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Answer from RAG"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "sources": [{"citation": "S1"}],
+            }
+        )
+
+    monkeypatch.setattr(main, "chat_completions", fake_chat_completions)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: object())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: object())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/api/chat",
+            headers={"Authorization": "Bearer test-key"},
+            json={
+                "model": "rag-local",
+                "messages": [{"role": "user", "content": "Question"}],
+                "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 128},
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["messages"] == [{"role": "user", "content": "Question"}]
+    assert captured["temperature"] == 0.2
+    assert captured["max_tokens"] == 128
+    assert response.json()["message"] == {"role": "assistant", "content": "Answer from RAG"}
+    assert response.json()["sources"] == [{"citation": "S1"}]
+    assert response.json()["done"] is True
+
+
+def test_ollama_api_chat_adapts_streaming_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None, gateway_api_key="test-key")
+
+    async def fake_chat_completions(body: dict[str, Any], *_args: Any) -> StreamingResponse:
+        return StreamingResponse(
+            iter(
+                [
+                    b'data: {"choices":[{"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}\n\n',
+                    b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            ),
+            media_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(main, "chat_completions", fake_chat_completions)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: object())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: object())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/api/chat",
+            headers={"Authorization": "Bearer test-key"},
+            json={
+                "model": "rag-local",
+                "messages": [{"role": "user", "content": "Question"}],
+            },
+        )
+
+    assert response.status_code == 200
+    chunks = [json.loads(line) for line in response.text.splitlines()]
+    assert chunks[0]["message"]["content"] == "Hello"
+    assert chunks[-1]["done"] is True
