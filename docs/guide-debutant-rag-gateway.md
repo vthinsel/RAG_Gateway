@@ -1,6 +1,8 @@
 # Guide de débutant : Atlas RAG Gateway
 
-Ce document explique comment l'application transforme des documents en réponses avec sources, où se trouvent les principales responsabilités dans le code et comment un client comme Open WebUI ou Hermes l'utilise.
+> **Statut du projet :** Atlas RAG Gateway est un projet personnel indépendant. Il n'est ni affilié à MongoDB, Inc., ni sponsorisé ou approuvé par cette société.
+
+Ce document explique comment l'application transforme des documents en réponses avec sources, où se trouvent les principales responsabilités dans le code et comment un client comme Open WebUI ou Hermes l'utilise. Lisez aussi [l'histoire du projet (en anglais)](project-story.md) pour comprendre les choix d'architecture.
 
 ## 1. Les fondamentaux
 
@@ -35,9 +37,9 @@ Le découpage est basé sur les caractères, pas sur les tokens du modèle. Il n
 
 ### Reranking : réordonner les résultats
 
-La recherche vectorielle sélectionne des passages candidats. Un *reranker* est une étape supplémentaire qui examine la question et chaque passage ensemble, puis les réordonne selon leur pertinence plus précise.
+La recherche vectorielle sélectionne des passages candidats. Un *reranker* examine ensemble la question et les passages candidats, puis les réordonne selon leur pertinence. Dans ce déploiement, Native Reranking de MongoDB est activé et géré de façon transparente par le service MongoDB après l'envoi par la gateway de son agrégation de recherche vectorielle filtrée par tenant. La gateway n'effectue pas d'appel de reranking séparé et n'expose pas de paramètre de configuration du reranker.
 
-Le reranking peut améliorer les premiers résultats, mais ajoute généralement un appel modèle, de la latence et un coût. **Cette application ne fait pas de reranking aujourd'hui.** Elle conserve l'ordre de la recherche vectorielle Atlas et applique seulement son seuil minimal de score. La recherche hybride texte + vecteurs n'est pas implémentée non plus.
+Native Reranking peut améliorer l'ordre des résultats, mais ajoute de la latence d'inférence et des coûts liés à l'utilisation. MongoDB indique que sa plateforme d'inférence s'exécute sur son infrastructure dans une région américaine ; vérifiez les conditions de service et les règles de données applicables avant d'y envoyer des contenus sensibles. La gateway applique toujours `RETRIEVAL_MIN_SCORE` aux scores renvoyés dans son flux de recherche. La recherche hybride texte + vecteurs n'est pas implémentée.
 
 ## 2. Vue d'ensemble
 
@@ -322,7 +324,7 @@ Les embeddings et le stockage sont des services cloud dans cette architecture : 
 
 Au démarrage, la gateway journalise les modèles Ollama détectés, envoie un ping à Atlas sans exposer les identifiants de l'URI, vérifie que l'index Vector Search configuré existe et est interrogeable, et liste les identifiants de tenant présents dans la collection. Si `MONGODB_API_KEY` est configurée, elle envoie également une petite requête d'embedding au point d'accès MongoDB AI, susceptible de compter dans l'utilisation de l'API ; sinon, cette vérification est journalisée comme ignorée. L'ingestion des documents et l'embedding des requêtes utilisent le même point d'accès et la même clé.
 
-L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. Elle n'intègre pas non plus de reranker, de recherche hybride, de jeu d'évaluation, de métriques Prometheus ou de filtrage ACL au niveau document. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
+L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. Elle propose un outil d'évaluation de la recherche à partir de questions et de documents attendus annotés manuellement, mais n'évalue pas la qualité des réponses générées. Native Reranking de MongoDB est activé et géré en dehors de la gateway ; l'application ne possède pas de reranker qu'elle orchestre elle-même, ni de recherche hybride, de métriques Prometheus ou de filtrage ACL au niveau document. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
 
 ## 8. Démarrage rapide
 

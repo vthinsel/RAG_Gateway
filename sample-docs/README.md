@@ -1,5 +1,7 @@
 # Synthetic demo corpus
 
+> Atlas RAG Gateway is an independent personal project and is not affiliated with, sponsored by, or endorsed by MongoDB, Inc.
+
 These fictional documents are provided for local ingestion and retrieval demos.
 They contain no real infrastructure inventory, credentials, or personal records.
 

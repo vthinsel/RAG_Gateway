@@ -7,6 +7,9 @@
         <mxCell id="title" value="Atlas RAG Gateway | Chat Request Sequence" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="35" y="20" width="800" height="40" as="geometry" />
         </mxCell>
+        <mxCell id="project-status" value="Independent personal project; not affiliated with, sponsored by, or endorsed by MongoDB, Inc." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="60" width="900" height="20" as="geometry" />
+        </mxCell>
         <mxCell id="user" value="User / agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f1fa;strokeColor=#4d82b4;strokeWidth=2;fontSize=15;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="40" y="90" width="150" height="60" as="geometry" />
         </mxCell>

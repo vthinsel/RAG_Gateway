@@ -1,6 +1,8 @@
 # Beginner's Guide: Atlas RAG Gateway
 
-This guide explains how the application turns documents into answers with sources, where the main responsibilities live in the code, and how a client such as Open WebUI or Hermes uses it. The [French version](guide-debutant-rag-gateway.md) is also available.
+> **Project status:** Atlas RAG Gateway is an independent personal project. It is not affiliated with, sponsored by, or endorsed by MongoDB, Inc.
+
+This guide explains how the application turns documents into answers with sources, where the main responsibilities live in the code, and how a client such as Open WebUI or Hermes uses it. Read the [story behind the project](project-story.md) for its design motivation, or use the [French version](guide-debutant-rag-gateway.md).
 
 ## 1. The Basics
 
@@ -35,9 +37,9 @@ Chunking is character-based, not token-based. It does not yet preserve Markdown 
 
 ### Reranking: reorder search results
 
-Vector search selects candidate passages. A *reranker* is an additional step that examines the question and each passage together, then reorders them by more precise relevance.
+Vector search selects candidate passages. A *reranker* examines the question and candidates together, then reorders them by relevance. In this deployment, MongoDB Native Reranking is enabled and handled transparently by the MongoDB service after the Gateway submits its tenant-filtered vector-search aggregation. The Gateway does not make a separate reranking API call or expose reranker configuration.
 
-Reranking can improve the top results, but it usually adds a model call, latency, and cost. **This application does not currently rerank results.** It keeps Atlas's vector-search order and applies only a minimum score threshold. Hybrid text-plus-vector search is not implemented either.
+Native Reranking can improve the order of retrieved candidates, but it adds inference latency and usage-based cost. MongoDB states that its model inference platform runs on MongoDB infrastructure in a US region; check current service terms and data policies before sending sensitive content. The Gateway still applies `RETRIEVAL_MIN_SCORE` to the scores returned through its search flow. Hybrid text-plus-vector search is not implemented.
 
 ## 2. At a Glance
 
@@ -322,7 +324,7 @@ Embeddings and storage are cloud services in this architecture: source text and 
 
 At startup, the gateway logs the Ollama models it discovers, pings Atlas without exposing URI credentials, checks whether the configured Atlas Vector Search index exists and is queryable, and lists the distinct tenant IDs found in the collection. If `MONGODB_API_KEY` is configured, it also sends a small model-check embedding request to the MongoDB AI API endpoint; this request may count toward API usage. Otherwise that check is logged as skipped. Document ingestion and query embedding use the same endpoint and key.
 
-The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It also has no reranker, hybrid search, evaluation set, Prometheus metrics, or document-level ACL filtering. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
+The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It has a retrieval evaluation workbench for manually labeled question/document cases, but no answer-quality evaluation. MongoDB Native Reranking is enabled and managed outside the Gateway; the application has no Gateway-managed reranker, hybrid search, Prometheus metrics, or document-level ACL filtering. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
 
 ## 8. Quick Start
 

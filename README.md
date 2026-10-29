@@ -1,6 +1,12 @@
 # Atlas RAG Gateway
 
+> **Project status:** Atlas RAG Gateway is an independent personal project. It is not affiliated with, sponsored by, or endorsed by MongoDB, Inc.
+
 A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with the configured model through MongoDB's AI Models API, retrieves matching chunks from MongoDB Atlas Vector Search, and sends the augmented conversation to a model served by local Ollama.
+
+The project is built around a practical balance: keep answer generation on infrastructure you control, use a capable embedding model to find relevant knowledge, and connect existing clients such as Open WebUI and Hermes through familiar APIs. This can reduce dependence on hosted generation and make answers more grounded in your own documents, while keeping the embedding and vector-storage services managed. It is not a zero-cost or fully private stack; review the data boundary and ongoing service costs before use.
+
+Read the [story behind the project](docs/project-story.md), the [beginner's guide in English](docs/beginner-guide-rag-gateway.md), or the [guide en français](docs/guide-debutant-rag-gateway.md) for the architecture, workflows, and user-facing tools.
 
 > **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
 
@@ -25,7 +31,7 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 
 The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, document ACL filtering, and reranking remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, uses tenant-filtered Atlas vector search with MongoDB Native Reranking enabled transparently by the MongoDB service, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. The Gateway does not issue a separate reranking request or expose reranker settings. Native Reranking is usage-billed, and MongoDB states its model inference runs on its infrastructure in a US region; review the service's current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, hybrid search, and document-level ACL filtering remain later phases.
 
 ## Build Plan
 
@@ -299,10 +305,10 @@ ruff check src tests scripts
 - Chunking is character-based and does not preserve Markdown section structure. DOCX/PPTX extraction currently reads text and tables but not embedded images; the configured Ollama OCR model is used for PDF pages and standalone image files.
 - This starter stores chunk text and vectors together in Atlas. Atlas and its AI model endpoint are cloud services; do not ingest restricted content without approval.
 - Tenant-scoped API keys are optional and configured statically through `API_KEY_REGISTRY`. There is no user identity provider, dynamic tenant provisioning, or document-level ACL enforcement.
-- Similarity search is the only retrieval mode. Evaluate reranking, hybrid full-text/vector retrieval, metadata/ACL filters, and query rewriting against a labeled test set before adding them.
+- Retrieval uses tenant-filtered vector search with MongoDB Native Reranking enabled by the managed service. Hybrid full-text/vector retrieval, additional metadata/ACL filters, and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
-- Evaluation currently measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness, reranker, hybrid search, structured request logging, and Prometheus metrics remain future work.
+- The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness, configurable Gateway-managed reranking, hybrid search, structured request logging, and Prometheus metrics remain future work. MongoDB Native Reranking is managed outside the Gateway and may incur usage-based charges.
 
 ## References
 

@@ -7,11 +7,14 @@
                 <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;" value="Atlas RAG Gateway | System Architecture" vertex="1">
                     <mxGeometry height="40" width="700" x="30" y="20" as="geometry"/>
                 </mxCell>
+                <mxCell id="project-status" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;" value="Independent personal project; not affiliated with, sponsored by, or endorsed by MongoDB, Inc." vertex="1">
+                    <mxGeometry height="20" width="900" x="30" y="55" as="geometry"/>
+                </mxCell>
                 <mxCell id="boundary-local" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 8;fillColor=#f7fbfa;strokeColor=#63a89d;strokeWidth=2;verticalAlign=top;align=left;fontStyle=1;fontSize=14;spacingTop=10;spacingLeft=12;" value="LOCAL / ON-PREM" vertex="1">
-                    <mxGeometry height="650" width="650" x="20" y="70" as="geometry"/>
+                    <mxGeometry height="630" width="650" x="20" y="90" as="geometry"/>
                 </mxCell>
                 <mxCell id="boundary-cloud" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=8 8;fillColor=#fcfaf5;strokeColor=#d5a34c;strokeWidth=2;verticalAlign=top;align=left;fontStyle=1;fontSize=14;spacingTop=10;spacingLeft=12;" value="CLOUD SERVICES" vertex="1">
-                    <mxGeometry height="650" width="650" x="730" y="70" as="geometry"/>
+                    <mxGeometry height="630" width="650" x="730" y="90" as="geometry"/>
                 </mxCell>
                 <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e5f4f0;strokeColor=#288879;strokeWidth=2;fontSize=15;fontStyle=1;" value="Local TXT / Markdown files&#xa;Folder ingester" vertex="1">
                     <mxGeometry height="80" width="220" x="55" y="130" as="geometry"/>
