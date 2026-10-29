@@ -518,6 +518,19 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
                     ],
                 },
             )
+            run_id = response.json().get("run_id")
+            saved_runs = client.get(
+                "/v1/evaluations/retrieval?tenant_id=tenant-a",
+                headers=headers,
+            )
+            saved_run = client.get(
+                f"/v1/evaluations/retrieval/{run_id}",
+                headers=headers,
+            )
+            comparison = client.get(
+                f"/v1/evaluations/retrieval/{run_id}/compare/{run_id}",
+                headers=headers,
+            )
             denied = client.post(
                 "/v1/evaluations/retrieval",
                 headers=headers,
@@ -539,6 +552,14 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
         assert "Retrieval evaluation" in page.text
         assert response.status_code == 200
         result = response.json()
+        assert run_id
+        assert saved_runs.status_code == 200
+        assert saved_runs.json()["runs"][0]["run_id"] == run_id
+        assert "cases" not in saved_runs.json()["runs"][0]
+        assert saved_run.status_code == 200
+        assert saved_run.json()["run_id"] == run_id
+        assert comparison.status_code == 200
+        assert comparison.json()["metrics"]["hit_rate_at_k"]["delta"] == 0
         assert result["metrics"]["case_count"] == 2
         assert result["metrics"]["hit_rate_at_k"] == 1
         assert result["metrics"]["recall_at_k"] == pytest.approx(2 / 3)

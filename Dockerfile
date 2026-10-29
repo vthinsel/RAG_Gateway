@@ -7,7 +7,9 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir ".[loader]" \
-    && useradd --create-home --uid 10001 appuser
+    && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /var/lib/rag-gateway \
+    && chown appuser:appuser /var/lib/rag-gateway
 
 USER appuser
 EXPOSE 8000

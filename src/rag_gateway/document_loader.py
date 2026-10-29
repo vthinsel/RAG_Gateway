@@ -61,6 +61,7 @@ class LoaderOptions:
     recursive: bool = True
     include_extensions: Sequence[str] | None = None
     exclude_extensions: Sequence[str] = ()
+    file_paths: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -346,20 +347,29 @@ async def load_directory(
 
     emit("scanning", "Scanning directory", directory=str(options.directory))
     scan = await asyncio.to_thread(scan_directory, options)
-    total = len(scan.files)
+    files = scan.files
+    if options.file_paths is not None:
+        selected_paths = set(options.file_paths)
+        files = [
+            path
+            for path in files
+            if path.relative_to(options.directory.expanduser().resolve()).as_posix()
+            in selected_paths
+        ]
+    total = len(files)
     emit(
         "scanned",
         f"Found {scan.discovered} files; {total} match the selected extensions",
         discovered=scan.discovered,
         eligible=total,
-        skipped=scan.skipped,
+        skipped=scan.skipped + len(scan.files) - total,
     )
 
     succeeded = 0
     failed = 0
     errors: list[dict[str, str]] = []
     root = options.directory.expanduser().resolve()
-    for index, path in enumerate(scan.files, start=1):
+    for index, path in enumerate(files, start=1):
         relative_path = path.relative_to(root).as_posix()
         emit("parsing", f"Parsing {relative_path}", current_file=relative_path, current=index, total=total)
         try:
@@ -417,7 +427,7 @@ async def load_directory(
         processed=total,
         succeeded=succeeded,
         failed=failed,
-        skipped=scan.skipped,
+        skipped=scan.skipped + len(scan.files) - total,
         elapsed_seconds=elapsed,
     )
     return LoadSummary(
@@ -425,7 +435,7 @@ async def load_directory(
         status=status,
         discovered=scan.discovered,
         eligible=total,
-        skipped=scan.skipped,
+        skipped=scan.skipped + len(scan.files) - total,
         processed=total,
         succeeded=succeeded,
         failed=failed,

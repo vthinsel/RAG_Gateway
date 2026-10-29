@@ -69,6 +69,7 @@
       cursor: pointer;
     }
     button.secondary { background: white; color: var(--green); }
+    button.danger { background: var(--red); border-color: var(--red); }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
     .status-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
@@ -180,6 +181,21 @@
         <ul id="events" aria-live="polite"></ul>
       </section>
     </div>
+    <section aria-labelledby="history-title">
+      <div class="status-line">
+        <h2 id="history-title">Recent ingestion jobs</h2>
+        <div class="buttons">
+          <button class="secondary" type="button" id="refresh-jobs">Refresh history</button>
+          <button class="danger" type="button" id="clear-jobs">Clear completed history</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Started</th><th>Tenant</th><th>Status</th><th>Processed</th><th>Result</th><th>Actions</th></tr></thead>
+          <tbody id="job-history"><tr><td colspan="6" class="muted">Load history to view recent jobs.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
     <p class="note"><a href="/">Back to gateway dashboard</a></p>
   </main>
   <script>
@@ -188,6 +204,7 @@
     const modelSelect = document.querySelector("#model");
     const message = document.querySelector("#message");
     const eventsList = document.querySelector("#events");
+    const jobHistory = document.querySelector("#job-history");
     const selectedFilesLabel = document.querySelector("#selected-files");
     const previewFileSelect = document.querySelector("#preview-file");
     const previewButton = document.querySelector("#preview-document");
@@ -381,6 +398,7 @@
         });
         activeJob = data.job_id;
         eventsList.replaceChildren();
+        await refreshJobHistory();
         pollJob();
       } catch (error) {
         message.textContent = error.message;
@@ -408,6 +426,7 @@
         const data = await api("/v1/document-loader/uploads", { method: "POST", body });
         activeJob = data.job_id;
         eventsList.replaceChildren();
+        await refreshJobHistory();
         pollJob();
       } catch (error) {
         message.textContent = error.message;
@@ -434,13 +453,19 @@
           item.textContent = `${event.stage}: ${event.message}`;
           eventsList.append(item);
         }
-        const terminal = ["completed", "completed_with_errors", "failed"].includes(job.status);
+        for (const file of job.files || []) {
+          const item = document.createElement("li");
+          item.textContent = `${file.status}: ${file.file}${file.chunks_upserted === undefined ? "" : ` · ${file.chunks_upserted} chunks`}${file.error ? ` · ${file.error}` : ""}`;
+          eventsList.append(item);
+        }
+        const terminal = ["completed", "completed_with_errors", "failed", "interrupted"].includes(job.status);
         if (terminal) {
           activeJob = null;
           document.querySelector("#start-local").disabled = false;
           document.querySelector("#start-upload").disabled = false;
           message.style.color = job.failed ? "#a63d35" : "#176f5b";
           message.textContent = `${job.succeeded || 0} succeeded, ${job.failed || 0} failed, ${job.skipped || 0} skipped.`;
+          refreshJobHistory();
           return;
         }
         window.setTimeout(pollJob, 900);
@@ -451,6 +476,127 @@
         message.textContent = error.message;
       }
     }
+
+    async function refreshJobHistory() {
+      try {
+        const data = await api("/v1/document-loader/jobs?limit=25");
+        jobHistory.replaceChildren();
+        if (!data.jobs.length) {
+          jobHistory.innerHTML = '<tr><td colspan="6" class="muted">No ingestion jobs yet.</td></tr>';
+          return;
+        }
+        for (const job of data.jobs) {
+          const row = document.createElement("tr");
+          for (const value of [
+            job.created_at ? new Date(job.created_at).toLocaleString() : "—",
+            job.tenant_id,
+            job.status.replaceAll("_", " "),
+            `${job.processed || 0} / ${job.eligible || 0}`,
+            `${job.succeeded || 0} succeeded · ${job.failed || 0} failed · ${job.skipped || 0} skipped`
+          ]) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.append(cell);
+          }
+          const actions = document.createElement("td");
+          const active = ["queued", "running", "scanning", "scanned", "parsing", "ingesting"].includes(job.status);
+          if (active) {
+            const cancelButton = document.createElement("button");
+            cancelButton.type = "button";
+            cancelButton.className = "danger";
+            cancelButton.textContent = "Cancel";
+            cancelButton.addEventListener("click", async event => {
+              event.stopPropagation();
+              try {
+                await api(`/v1/document-loader/jobs/${encodeURIComponent(job.job_id)}/cancel`, {
+                  method: "POST",
+                  body: JSON.stringify({})
+                });
+                await refreshJobHistory();
+              } catch (error) {
+                message.textContent = error.message;
+              }
+            });
+            actions.append(cancelButton);
+          } else if (job.retryable && ["completed_with_errors", "failed"].includes(job.status)) {
+            const retryButton = document.createElement("button");
+            retryButton.type = "button";
+            retryButton.className = "secondary";
+            retryButton.textContent = "Retry failed";
+            retryButton.addEventListener("click", async event => {
+              event.stopPropagation();
+              try {
+                const retry = await api(
+                  `/v1/document-loader/jobs/${encodeURIComponent(job.job_id)}/retry`,
+                  { method: "POST", body: JSON.stringify({}) }
+                );
+                activeJob = retry.job_id;
+                await pollJob();
+                await refreshJobHistory();
+              } catch (error) {
+                message.textContent = error.message;
+              }
+            });
+            actions.append(retryButton);
+          }
+          row.append(actions);
+          row.tabIndex = 0;
+          row.title = "Load this job's progress details";
+          row.addEventListener("click", () => loadJob(job.job_id));
+          jobHistory.append(row);
+        }
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      }
+    }
+
+    async function loadJob(jobId) {
+      try {
+        const job = await api(`/v1/document-loader/jobs/${encodeURIComponent(jobId)}`);
+        activeJob = ["queued", "running", "scanning", "scanned", "parsing", "ingesting"].includes(job.status)
+          ? jobId
+          : null;
+        document.querySelector("#status").textContent = job.status.replaceAll("_", " ");
+        document.querySelector("#eligible").textContent = job.eligible || 0;
+        document.querySelector("#processed").textContent = job.processed || 0;
+        document.querySelector("#succeeded").textContent = job.succeeded || 0;
+        document.querySelector("#failed").textContent = job.failed || 0;
+        document.querySelector("#current").textContent = job.current_file || "Job details loaded";
+        eventsList.replaceChildren();
+        for (const event of (job.events || []).slice(-40)) {
+          const item = document.createElement("li");
+          item.textContent = `${event.stage}: ${event.message}`;
+          eventsList.append(item);
+        }
+        for (const file of job.files || []) {
+          const item = document.createElement("li");
+          item.textContent = `${file.status}: ${file.file}${file.chunks_upserted === undefined ? "" : ` · ${file.chunks_upserted} chunks`}${file.error ? ` · ${file.error}` : ""}`;
+          eventsList.append(item);
+        }
+        if (activeJob) pollJob();
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      }
+    }
+
+    document.querySelector("#refresh-jobs").addEventListener("click", refreshJobHistory);
+    document.querySelector("#clear-jobs").addEventListener("click", async () => {
+      if (!window.confirm("Clear completed job history for the authorized tenant(s)?")) return;
+      try {
+        const result = await api("/v1/document-loader/jobs", {
+          method: "DELETE",
+          body: JSON.stringify({})
+        });
+        message.style.color = "#176f5b";
+        message.textContent = `${result.deleted_jobs} completed job(s) cleared.`;
+        await refreshJobHistory();
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      }
+    });
   </script>
 </body>
 </html>

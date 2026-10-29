@@ -225,10 +225,19 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | --- | --- |
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Configuration and Atlas readiness |
+| `GET /metrics` | Authenticated Prometheus-format request counts and cumulative latency |
+| `GET /v1/document-loader/jobs?limit=25` | List recent ingestion jobs for authorized tenants |
+| `GET /v1/document-loader/jobs/{job_id}` | Get durable ingestion job progress and file outcomes |
+| `POST /v1/document-loader/jobs/{job_id}/cancel` | Cancel a currently running ingestion job |
+| `POST /v1/document-loader/jobs/{job_id}/retry` | Retry failed files from an allowed directory-based job |
+| `DELETE /v1/document-loader/jobs` | Clear completed job history for authorized tenant(s) |
 | `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials |
 | `GET /tools/evaluation` | Browser workbench for retrieval metrics against manually labeled questions |
 | `GET /tools/playground` | Try retrieval-only queries or chat grounded in retrieved sources |
 | `POST /v1/evaluations/retrieval` | Run retrieval hit-rate, recall, ranking, and latency evaluation cases |
+| `GET /v1/evaluations/retrieval?tenant_id=...` | List saved retrieval evaluation runs |
+| `GET /v1/evaluations/retrieval/{run_id}` | Get a saved evaluation run and its case details |
+| `GET /v1/evaluations/retrieval/{run_id}/compare/{baseline_id}` | Compare runs using the same tenant, top K, and labeled cases |
 | `POST /v1/document-loader/preview` | Extract and preview one uploaded document without ingesting it |
 | `GET /v1/admin/environment` | Admin-only redacted settings snapshot |
 | `PUT /v1/admin/environment` | Admin-only persistent settings update |
@@ -249,6 +258,8 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama; optional `top_k` must be between 1 and 50 |
 
 The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs; metrics report hit rate, recall, mean reciprocal rank, and latency for retrieval only, not generated-answer quality. The API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/playground` to compare retrieval-only results with RAG chat, adjust the number of sources (1–50), and inspect source chunks or citations. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use bearer authentication; registered keys remain limited to their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
+
+Ingestion jobs and retrieval evaluation runs are stored in the local SQLite database configured by `OPERATIONS_DB_PATH` (default `data/rag_gateway_operations.sqlite3`). Keep this file on persistent storage and include it in the Gateway's backup/retention policy. The database contains ingestion metadata and evaluation queries/results, so protect it accordingly. Jobs active during shutdown are marked `interrupted`; they are not resumed automatically. Failed files from directory-based jobs can be retried while the source files remain available under `DOCUMENT_LOADER_ROOTS`; browser-upload sources are temporary and must be uploaded again. Clearing history removes terminal job records but never deletes active jobs or ingested Atlas content. Docker Compose stores this database in the `rag-gateway-data` named volume. Request logs include a validated/generated `X-Request-ID` and route/status/duration fields as JSON. The authenticated `/metrics` endpoint exposes process-local Prometheus counters; counters reset when the Gateway restarts and are not intended as durable billing records.
 
 Example ingestion body:
 
@@ -286,6 +297,7 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `DOCUMENT_LOADER_ENABLED` | `false` | Enables the authenticated browser loader and its job APIs |
 | `DOCUMENT_LOADER_ROOTS` | `[]` | JSON array of directories the browser loader is allowed to scan |
 | `DOCUMENT_LOADER_MAX_ACTIVE_JOBS` | `2` | Maximum concurrent browser loader jobs |
+| `OPERATIONS_DB_PATH` | `data/rag_gateway_operations.sqlite3` | SQLite file for durable ingestion and retrieval-evaluation history |
 | `DOCUMENT_PARSER_MODEL` | `glm-ocr:latest` | Ollama model used to parse PDF pages and images |
 | `DOCUMENT_PARSER_TIMEOUT_SECONDS` | `300` | Timeout for an Ollama parsing request |
 
@@ -308,7 +320,7 @@ ruff check src tests scripts
 - Retrieval uses tenant-filtered vector search with MongoDB Native Reranking enabled by the managed service. Hybrid full-text/vector retrieval, additional metadata/ACL filters, and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
-- The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness, configurable Gateway-managed reranking, hybrid search, structured request logging, and Prometheus metrics remain future work. MongoDB Native Reranking is managed outside the Gateway and may incur usage-based charges.
+- The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness and configurable Gateway-managed reranking remain future work. MongoDB Native Reranking is managed outside the Gateway and may incur usage-based charges.
 
 ## References
 

@@ -49,6 +49,7 @@
     td { font-size: 13px; overflow-wrap: anywhere; }
     .hit { color: var(--green); font-weight: 700; }
     .miss { color: var(--red); font-weight: 700; }
+    .compare { margin-top: 12px; }
     code { overflow-wrap: anywhere; }
     @media (max-width: 620px) {
       header { padding: 22px 18px; }
@@ -93,6 +94,29 @@
       </div>
       <p id="message" role="status" aria-live="polite"></p>
     </section>
+    <section aria-labelledby="saved-runs-title">
+      <div class="status-head">
+        <h2 id="saved-runs-title">Saved evaluation runs</h2>
+        <button type="button" class="secondary" id="refresh-runs">Refresh runs</button>
+      </div>
+      <div class="two">
+        <div class="field">
+          <label for="baseline-run">Baseline run</label>
+          <select id="baseline-run"><option value="">Select a baseline run</option></select>
+        </div>
+        <div class="field">
+          <label for="compare-run">Compare against latest</label>
+          <button type="button" class="secondary" id="compare-runs">Compare selected baseline</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Run</th><th>Tenant</th><th>Top K</th><th>Hit rate</th><th>Recall</th><th>MRR</th><th>Latency</th><th></th></tr></thead>
+          <tbody id="saved-runs"><tr><td colspan="8" class="note">Enter a bearer token and refresh to load saved runs.</td></tr></tbody>
+        </table>
+      </div>
+      <div id="comparison" class="compare" aria-live="polite"></div>
+    </section>
     <section aria-labelledby="metrics-title">
       <h2 id="metrics-title">Results</h2>
       <div id="metrics" class="metrics" aria-live="polite">
@@ -120,6 +144,10 @@
     const message = document.querySelector("#message");
     const resultsBody = document.querySelector("#results");
     const metrics = document.querySelector("#metrics");
+    const savedRunsBody = document.querySelector("#saved-runs");
+    const baselineSelect = document.querySelector("#baseline-run");
+    const comparison = document.querySelector("#comparison");
+    let savedRuns = [];
     casesInput.value = JSON.stringify(exampleCases, null, 2);
 
     function metricCard(label, value) {
@@ -168,9 +196,113 @@
       }
     }
 
+    function authHeaders() {
+      const token = document.querySelector("#token").value.trim();
+      if (!token) throw new Error("Enter a gateway bearer token.");
+      return { "Authorization": ["Bearer", token].join(" ") };
+    }
+
+    async function api(path) {
+      const response = await fetch(path, { headers: authHeaders() });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `Request failed (${response.status}).`);
+      return data;
+    }
+
+    async function refreshSavedRuns() {
+      const tenant = document.querySelector("#tenant").value.trim();
+      const data = await api(`/v1/evaluations/retrieval?limit=50&tenant_id=${encodeURIComponent(tenant)}`);
+      savedRuns = data.runs;
+      savedRunsBody.replaceChildren();
+      baselineSelect.replaceChildren(new Option("Select a baseline run", ""));
+      for (const run of data.runs) {
+        const option = new Option(
+          `${new Date(run.created_at).toLocaleString()} · ${run.metrics.hit_rate_at_k.toFixed(2)} hit rate`,
+          run.run_id
+        );
+        baselineSelect.add(option);
+        const row = document.createElement("tr");
+        const values = [
+          new Date(run.created_at).toLocaleString(),
+          run.tenant_id,
+          String(run.top_k),
+          `${(run.metrics.hit_rate_at_k * 100).toFixed(1)}%`,
+          `${(run.metrics.recall_at_k * 100).toFixed(1)}%`,
+          run.metrics.mean_reciprocal_rank.toFixed(3),
+          `${run.metrics.mean_latency_ms.toFixed(0)} ms`
+        ];
+        for (const value of values) {
+          const item = document.createElement("td");
+          item.textContent = value;
+          row.append(item);
+        }
+        const actionCell = document.createElement("td");
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "secondary";
+        openButton.textContent = "View";
+        openButton.addEventListener("click", async () => {
+          try {
+            const result = await api(`/v1/evaluations/retrieval/${encodeURIComponent(run.run_id)}`);
+            renderResults(result);
+            comparison.textContent = `Loaded saved run ${result.run_id}.`;
+          } catch (error) {
+            comparison.textContent = error.message;
+          }
+        });
+        actionCell.append(openButton);
+        row.append(actionCell);
+        savedRunsBody.append(row);
+      }
+      if (!data.runs.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 8;
+        cell.className = "note";
+        cell.textContent = "No saved runs for this tenant.";
+        row.append(cell);
+        savedRunsBody.append(row);
+      }
+    }
+
     document.querySelector("#load-example").addEventListener("click", () => {
       casesInput.value = JSON.stringify(exampleCases, null, 2);
       message.textContent = "";
+    });
+
+    document.querySelector("#refresh-runs").addEventListener("click", async () => {
+      comparison.textContent = "";
+      try {
+        await refreshSavedRuns();
+      } catch (error) {
+        comparison.textContent = error.message;
+      }
+    });
+
+    document.querySelector("#compare-runs").addEventListener("click", async () => {
+      comparison.textContent = "";
+      try {
+        const selectedBaseline = baselineSelect.value;
+        if (!selectedBaseline) throw new Error("Choose a baseline run to compare.");
+        const baseline = savedRuns.find(run => run.run_id === selectedBaseline);
+        const latest = savedRuns.find(run =>
+          run.run_id !== selectedBaseline
+          && run.top_k === baseline.top_k
+          && run.dataset_id === baseline.dataset_id
+        );
+        if (!latest) throw new Error("A second saved run is required for comparison.");
+        const result = await api(
+          `/v1/evaluations/retrieval/${encodeURIComponent(latest.run_id)}/compare/${encodeURIComponent(selectedBaseline)}`
+        );
+        const title = document.createElement("strong");
+        title.textContent = `Latest run vs baseline (${selectedBaseline.slice(0, 8)}): `;
+        const summary = Object.entries(result.metrics).map(([name, values]) =>
+          `${name.replaceAll("_", " ")} ${values.delta >= 0 ? "+" : ""}${values.delta.toFixed(3)}`
+        ).join(" · ");
+        comparison.replaceChildren(title, document.createTextNode(summary));
+      } catch (error) {
+        comparison.textContent = error.message;
+      }
     });
 
     document.querySelector("#run-evaluation").addEventListener("click", async event => {
@@ -208,7 +340,12 @@
         }
         renderResults(data);
         message.style.color = "#176f5b";
-        message.textContent = "Evaluation complete. Metrics use exact document ID matches.";
+        message.textContent = `Evaluation saved as ${data.run_id}. Metrics use exact document ID matches.`;
+        try {
+          await refreshSavedRuns();
+        } catch (error) {
+          message.textContent += ` Saved-run list refresh failed: ${error.message}`;
+        }
       } catch (error) {
         message.style.color = "#a63d35";
         message.textContent = error.message;

@@ -5,10 +5,13 @@ services:
       - .env
     environment:
       OLLAMA_BASE_URL: "${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}"
+      OPERATIONS_DB_PATH: /var/lib/rag-gateway/operations.sqlite3
     ports:
       - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - rag-gateway-data:/var/lib/rag-gateway
     read_only: true
     tmpfs:
       - /tmp
@@ -27,3 +30,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  rag-gateway-data:

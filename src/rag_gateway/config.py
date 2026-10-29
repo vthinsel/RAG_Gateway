@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     document_loader_max_active_jobs: int = Field(default=2, ge=1, le=8)
     document_parser_model: str = "glm-ocr:latest"
     document_parser_timeout_seconds: float = Field(default=300.0, gt=0)
+    operations_db_path: Path = Path("data/rag_gateway_operations.sqlite3")
 
     @property
     def mongodb_api_model_base_url(self) -> str:

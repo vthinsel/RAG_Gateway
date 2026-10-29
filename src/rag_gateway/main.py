@@ -53,6 +53,8 @@ from rag_gateway.models import (
     IngestResult,
     RetrievalEvaluationRequest,
 )
+from rag_gateway.observability import ObservabilityMiddleware, request_metrics
+from rag_gateway.operations import OperationsStore
 from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder
@@ -134,6 +136,7 @@ async def _check_mongodb_ai_model_api(settings: Settings, client: httpx.AsyncCli
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    app.state.operations = await run_in_threadpool(OperationsStore, settings.operations_db_path)
     logger.info(
         "Gateway authentication configuration: cwd=%s dotenv=%s dotenv_exists=%s "
         "gateway_key_configured=%s process_env_override=%s registry_entries=%s",
@@ -146,8 +149,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout_seconds)
     app.state.store = None
-    app.state.document_loader_jobs = {}
     app.state.document_loader_tasks = set()
+    app.state.document_loader_job_tasks = {}
     atlas_error: PyMongoError | None = None
     if settings.mongodb_uri:
         logger.info(
@@ -262,12 +265,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.http.aclose()
         raise atlas_error
     yield
+    active_tasks = tuple(app.state.document_loader_tasks)
+    for task in active_tasks:
+        task.cancel()
+    if active_tasks:
+        await asyncio.gather(*active_tasks, return_exceptions=True)
     if app.state.store is not None:
         await run_in_threadpool(app.state.store.close)
     await app.state.http.aclose()
 
 
 app = FastAPI(title="Atlas RAG Gateway", version="0.1.0", lifespan=lifespan)
+app.add_middleware(ObservabilityMiddleware)
 
 
 def _require_document_loader(settings: Settings) -> None:
@@ -285,19 +294,6 @@ def _resolve_loader_directory(directory: Path, roots: list[Path]) -> Path:
     if not any(resolved == root or root in resolved.parents for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Directory is outside DOCUMENT_LOADER_ROOTS")
     return resolved
-
-
-def _job_for_tenant(
-    job_id: str,
-    jobs: dict[str, dict[str, Any]],
-    allowed_tenants: list[str] | None,
-) -> dict[str, Any]:
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Loader job not found")
-    if allowed_tenants is not None and job["tenant_id"] not in allowed_tenants:
-        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
-    return job
 
 
 def require_api_key(
@@ -388,6 +384,14 @@ def _requested_top_k(value: Any, default: int) -> int:
 @app.get("/healthz")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics(_: list[str] | None = Depends(require_api_key)) -> Response:
+    return Response(
+        content=request_metrics.prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/", include_in_schema=False)
@@ -714,6 +718,7 @@ async def _queue_document_loader_job(
     store: AtlasStore,
     embedder: VoyageEmbedder,
     cleanup_directory: bool = False,
+    file_paths: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     tasks: set[asyncio.Task[Any]] = request.app.state.document_loader_tasks
     if sum(not task.done() for task in tasks) >= settings.document_loader_max_active_jobs:
@@ -745,9 +750,13 @@ async def _queue_document_loader_job(
     job: dict[str, Any] = {
         "job_id": job_id,
         "status": "queued",
+        "created_at": datetime.now(UTC).isoformat(),
         "directory": "browser upload" if cleanup_directory else str(directory),
         "tenant_id": tenant_id,
         "model": parser.model,
+        "recursive": recursive,
+        "include_extensions": sorted(include_extensions) if include_extensions else None,
+        "exclude_extensions": sorted(exclude_extensions),
         "discovered": 0,
         "eligible": 0,
         "skipped": 0,
@@ -755,11 +764,12 @@ async def _queue_document_loader_job(
         "succeeded": 0,
         "failed": 0,
         "current_file": None,
+        "files": [],
         "errors": [],
         "events": [{"stage": "queued", "message": "Job queued"}],
     }
-    jobs: dict[str, dict[str, Any]] = request.app.state.document_loader_jobs
-    jobs[job_id] = job
+    operations: OperationsStore = request.app.state.operations
+    operations.save_job(job)
 
     async def ingest_parsed_document(document: ParsedDocument) -> dict[str, Any]:
         chunks = chunk_text(document.text, settings.chunk_size, settings.chunk_overlap)
@@ -778,11 +788,23 @@ async def _queue_document_loader_job(
         job.update({key: value for key, value in event.items() if key != "message"})
         job["status"] = event["stage"]
         job["events"].append(event)
+        if event["stage"] in {"succeeded", "file_failed"}:
+            outcome: dict[str, Any] = {
+                "file": event.get("current_file", ""),
+                "status": "succeeded" if event["stage"] == "succeeded" else "failed",
+            }
+            if "chunks_upserted" in event:
+                outcome["chunks_upserted"] = event["chunks_upserted"]
+            if "error" in event:
+                outcome["error"] = event["error"]
+            job["files"].append(outcome)
         if len(job["events"]) > 250:
             del job["events"][:-250]
+        operations.save_job(job)
 
     async def run_job() -> None:
         job["status"] = "running"
+        operations.save_job(job)
         try:
             summary = await load_directory(
                 LoaderOptions(
@@ -791,6 +813,7 @@ async def _queue_document_loader_job(
                     recursive=recursive,
                     include_extensions=include_extensions,
                     exclude_extensions=exclude_extensions,
+                    file_paths=file_paths,
                 ),
                 parser,
                 ingest_parsed_document,
@@ -802,19 +825,40 @@ async def _queue_document_loader_job(
             job["tenant_id"] = tenant_id
             job["model"] = parser.model
             job["events"] = job["events"][-250:]
+        except asyncio.CancelledError:
+            persisted_job = operations.get_job(job_id)
+            if persisted_job is not None and persisted_job["status"] == "cancelled":
+                job.update(persisted_job)
+            else:
+                job["status"] = "interrupted"
+                job["events"].append(
+                    {"stage": "interrupted", "message": "Gateway stopped before this job completed"}
+                )
+            raise
         except Exception as error:  # noqa: BLE001
             job["status"] = "failed"
             job["failed"] += 1
             job["errors"].append({"file": "", "error": str(error)})
             job["events"].append({"stage": "failed", "message": str(error)})
         finally:
-            parser.close()
-            if cleanup_directory:
-                await asyncio.to_thread(shutil.rmtree, directory, True)
+            try:
+                operations.save_job(job)
+            finally:
+                parser.close()
+                if cleanup_directory:
+                    await asyncio.to_thread(shutil.rmtree, directory, True)
 
     task = asyncio.create_task(run_job())
     tasks.add(task)
-    task.add_done_callback(tasks.discard)
+    job_tasks: dict[str, asyncio.Task[Any]] = request.app.state.document_loader_job_tasks
+    job_tasks[job_id] = task
+
+    def remove_task(completed_task: asyncio.Task[Any]) -> None:
+        tasks.discard(completed_task)
+        if job_tasks.get(job_id) is completed_task:
+            job_tasks.pop(job_id, None)
+
+    task.add_done_callback(remove_task)
     return {"job_id": job_id, "status": job["status"], "status_url": f"/v1/document-loader/jobs/{job_id}"}
 
 
@@ -976,8 +1020,111 @@ async def get_document_loader_job(
     request: Request,
     allowed_tenants: list[str] | None = Depends(require_tool_api_key),
 ) -> dict[str, Any]:
-    job = _job_for_tenant(job_id, request.app.state.document_loader_jobs, allowed_tenants)
-    return dict(job)
+    operations: OperationsStore = request.app.state.operations
+    job = operations.get_job(job_id, allowed_tenants)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Loader job not found")
+    return job
+
+
+@app.get("/v1/document-loader/jobs")
+async def list_document_loader_jobs(
+    request: Request,
+    limit: int = 50,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, Any]:
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    operations: OperationsStore = request.app.state.operations
+    return {"jobs": operations.list_jobs(allowed_tenants, limit)}
+
+
+@app.post("/v1/document-loader/jobs/{job_id}/cancel")
+async def cancel_document_loader_job(
+    job_id: str,
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, str]:
+    operations: OperationsStore = request.app.state.operations
+    job = operations.get_job(job_id, allowed_tenants)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Loader job not found")
+    task: asyncio.Task[Any] | None = request.app.state.document_loader_job_tasks.get(job_id)
+    if task is None or task.done():
+        raise HTTPException(status_code=409, detail="Loader job is not currently running")
+    job["status"] = "cancelled"
+    job["events"].append({"stage": "cancelled", "message": "Job cancelled by request"})
+    operations.save_job(job)
+    task.cancel()
+    return {"job_id": job_id, "status": "cancelled"}
+
+
+@app.post("/v1/document-loader/jobs/{job_id}/retry", status_code=202)
+async def retry_failed_document_loader_files(
+    job_id: str,
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+    settings: Settings = Depends(get_settings),
+    store: AtlasStore = Depends(get_store),
+    embedder: VoyageEmbedder = Depends(get_embedder),
+) -> dict[str, Any]:
+    _require_document_loader(settings)
+    operations: OperationsStore = request.app.state.operations
+    job = operations.get_job(job_id, allowed_tenants)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Loader job not found")
+    if job["status"] not in {"completed_with_errors", "failed"}:
+        raise HTTPException(status_code=409, detail="Wait for the loader job to finish before retrying")
+    failed_files = [
+        file["file"] for file in job.get("files", []) if file.get("status") == "failed"
+    ]
+    if not failed_files:
+        raise HTTPException(status_code=409, detail="This job has no failed files to retry")
+    if job["directory"] == "browser upload":
+        raise HTTPException(
+            status_code=409,
+            detail="Uploaded source files are temporary; select and upload the failed files again",
+        )
+    directory = _resolve_loader_directory(Path(job["directory"]), settings.document_loader_roots)
+    for failed_file in failed_files:
+        relative_path = PurePosixPath(failed_file)
+        if (
+            relative_path.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+            or "\x00" in failed_file
+        ):
+            raise HTTPException(status_code=409, detail="Stored failed-file path is invalid")
+        source = directory.joinpath(*relative_path.parts).resolve()
+        if not source.is_relative_to(directory) or not source.is_file():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Failed source file is no longer available: {failed_file}",
+            )
+    return await _queue_document_loader_job(
+        directory=directory,
+        tenant_id=job["tenant_id"],
+        recursive=job["recursive"],
+        include_extensions=(
+            frozenset(job["include_extensions"]) if job["include_extensions"] else None
+        ),
+        exclude_extensions=frozenset(job["exclude_extensions"]),
+        model=job["model"],
+        request=request,
+        settings=settings,
+        store=store,
+        embedder=embedder,
+        file_paths=tuple(failed_files),
+    )
+
+
+@app.delete("/v1/document-loader/jobs")
+async def clear_document_loader_history(
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, int]:
+    operations: OperationsStore = request.app.state.operations
+    deleted = operations.clear_completed_jobs(allowed_tenants)
+    return {"deleted_jobs": deleted}
 
 
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
@@ -1170,6 +1317,7 @@ async def retrieve(
 @app.post("/v1/evaluations/retrieval")
 async def evaluate_retrieval(
     body: RetrievalEvaluationRequest,
+    request: Request,
     allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
     store: AtlasStore = Depends(get_store),
@@ -1226,7 +1374,7 @@ async def evaluate_retrieval(
         )
 
     case_count = len(cases)
-    return {
+    result = {
         "tenant_id": tenant_id,
         "top_k": body.top_k,
         "metrics": {
@@ -1241,6 +1389,92 @@ async def evaluate_retrieval(
             "mean_latency_ms": latency_sum / case_count,
         },
         "cases": cases,
+    }
+    operations: OperationsStore = request.app.state.operations
+    run_id = await run_in_threadpool(operations.save_evaluation, result)
+    saved = await run_in_threadpool(operations.get_evaluation, run_id, allowed_tenants)
+    if saved is None:
+        raise HTTPException(status_code=500, detail="Could not load saved evaluation")
+    return saved
+
+
+@app.get("/v1/evaluations/retrieval")
+async def list_retrieval_evaluations(
+    request: Request,
+    tenant_id: str | None = None,
+    limit: int = 50,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, Any]:
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if tenant_id is not None and (
+        not tenant_id or len(tenant_id) > 256
+    ):
+        raise HTTPException(status_code=400, detail="Invalid tenant ID")
+    if tenant_id is not None and allowed_tenants is not None and tenant_id not in allowed_tenants:
+        raise HTTPException(status_code=403, detail="API key is not authorized for this tenant")
+    operations: OperationsStore = request.app.state.operations
+    runs = await run_in_threadpool(
+        operations.list_evaluations, allowed_tenants, tenant_id, limit
+    )
+    return {"runs": runs}
+
+
+@app.get("/v1/evaluations/retrieval/{run_id}")
+async def get_retrieval_evaluation(
+    run_id: str,
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, Any]:
+    operations: OperationsStore = request.app.state.operations
+    result = await run_in_threadpool(operations.get_evaluation, run_id, allowed_tenants)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Evaluation run not found")
+    return result
+
+
+@app.get("/v1/evaluations/retrieval/{run_id}/compare/{baseline_id}")
+async def compare_retrieval_evaluations(
+    run_id: str,
+    baseline_id: str,
+    request: Request,
+    allowed_tenants: list[str] | None = Depends(require_tool_api_key),
+) -> dict[str, Any]:
+    operations: OperationsStore = request.app.state.operations
+    current = await run_in_threadpool(operations.get_evaluation, run_id, allowed_tenants)
+    baseline = await run_in_threadpool(
+        operations.get_evaluation, baseline_id, allowed_tenants
+    )
+    if current is None or baseline is None:
+        raise HTTPException(status_code=404, detail="Evaluation run not found")
+    if current["tenant_id"] != baseline["tenant_id"]:
+        raise HTTPException(status_code=400, detail="Evaluation runs must use the same tenant")
+    if current["top_k"] != baseline["top_k"]:
+        raise HTTPException(status_code=400, detail="Evaluation runs must use the same top_k")
+    if current["dataset_id"] != baseline["dataset_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Evaluation runs must use the same queries and expected document IDs",
+        )
+    current_metrics = current["metrics"]
+    baseline_metrics = baseline["metrics"]
+    return {
+        "run_id": run_id,
+        "baseline_id": baseline_id,
+        "tenant_id": current["tenant_id"],
+        "metrics": {
+            key: {
+                "current": current_metrics[key],
+                "baseline": baseline_metrics[key],
+                "delta": round(current_metrics[key] - baseline_metrics[key], 6),
+            }
+            for key in (
+                "hit_rate_at_k",
+                "recall_at_k",
+                "mean_reciprocal_rank",
+                "mean_latency_ms",
+            )
+        },
     }
 
 

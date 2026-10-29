@@ -277,6 +277,14 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
                 if job["status"] in {"completed", "completed_with_errors", "failed"}:
                     break
                 time.sleep(0.01)
+            job_history = client.get(
+                "/v1/document-loader/jobs?limit=25",
+                headers={"Authorization": "Bearer test-key"},
+            )
+            cleared_history = client.delete(
+                "/v1/document-loader/jobs",
+                headers={"Authorization": "Bearer test-key"},
+            )
 
             traversal_response = client.post(
                 "/v1/document-loader/uploads",
@@ -286,6 +294,20 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
             )
 
         assert job["status"] == "completed"
+        assert {file["file"] for file in job["files"]} == {
+            "lab/architecture.md",
+            "diagram.mmd",
+        }
+        assert all(file["status"] == "succeeded" for file in job["files"])
+        assert job_history.status_code == 200, job_history.text
+        assert any(item["job_id"] == job_id for item in job_history.json()["jobs"])
+        assert cleared_history.status_code == 200
+        assert cleared_history.json()["deleted_jobs"] >= 1
+        remaining_jobs = client.get(
+            "/v1/document-loader/jobs?limit=100",
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert all(item["job_id"] != job_id for item in remaining_jobs.json()["jobs"])
         assert job["succeeded"] == 2
         assert job["skipped"] == 1
         assert traversal_response.status_code == 422
@@ -294,6 +316,131 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
             "diagram.mmd",
         }
         assert all(tenant_id == "default" for tenant_id, _, _ in ingested_documents)
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+        main.app.dependency_overrides.pop(main.get_store, None)
+        main.app.dependency_overrides.pop(main.get_embedder, None)
+
+
+def test_document_loader_retries_failed_files_from_allowed_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="test-key",
+        document_loader_enabled=True,
+        document_loader_roots=[tmp_path],
+    )
+    source_directory = tmp_path / "source"
+    source_directory.mkdir()
+    (source_directory / "retry.txt").write_text("retry this file", encoding="utf-8")
+    parse_attempts = 0
+
+    class FakeStore:
+        def replace_document(self, *_args: Any) -> int:
+            return 1
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "document"
+            return [[0.1] for _ in texts]
+
+    class FakeParser:
+        def __init__(self, _url: str, model: str, *_args: Any) -> None:
+            self.model = model
+
+        def list_models(self) -> list[str]:
+            return [self.model]
+
+        def extract(self, path: Path) -> str:
+            nonlocal parse_attempts
+            if path.name == "slow.txt":
+                time.sleep(0.2)
+                return path.read_text(encoding="utf-8")
+            parse_attempts += 1
+            if parse_attempts == 1:
+                raise ValueError("temporary parse failure")
+            return path.read_text(encoding="utf-8")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_store, lambda: FakeStore())
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(main.app) as client:
+            headers = {"Authorization": "Bearer test-key"}
+            started = client.post(
+                "/v1/document-loader/jobs",
+                headers=headers,
+                json={
+                    "directory": str(source_directory),
+                    "tenant_id": "default",
+                    "include_extensions": ["txt"],
+                },
+            )
+            assert started.status_code == 202, started.text
+            original_id = started.json()["job_id"]
+            original = None
+            for _ in range(100):
+                original = client.get(
+                    f"/v1/document-loader/jobs/{original_id}", headers=headers
+                ).json()
+                if original["status"] in {"completed_with_errors", "failed"}:
+                    break
+                time.sleep(0.01)
+            assert original is not None
+            assert original["status"] == "completed_with_errors"
+
+            retry = client.post(
+                f"/v1/document-loader/jobs/{original_id}/retry",
+                headers=headers,
+                json={},
+            )
+            assert retry.status_code == 202, retry.text
+            retry_id = retry.json()["job_id"]
+            retried = None
+            for _ in range(100):
+                retried = client.get(
+                    f"/v1/document-loader/jobs/{retry_id}", headers=headers
+                ).json()
+                if retried["status"] in {"completed", "completed_with_errors", "failed"}:
+                    break
+                time.sleep(0.01)
+
+            slow_directory = tmp_path / "slow-source"
+            slow_directory.mkdir()
+            (slow_directory / "slow.txt").write_text("cancel this file", encoding="utf-8")
+            slow_job = client.post(
+                "/v1/document-loader/jobs",
+                headers=headers,
+                json={
+                    "directory": str(slow_directory),
+                    "tenant_id": "default",
+                    "include_extensions": ["txt"],
+                },
+            )
+            slow_job_id = slow_job.json()["job_id"]
+            cancelled = client.post(
+                f"/v1/document-loader/jobs/{slow_job_id}/cancel",
+                headers=headers,
+                json={},
+            )
+            cancelled_job = client.get(
+                f"/v1/document-loader/jobs/{slow_job_id}", headers=headers
+            ).json()
+
+        assert retried is not None
+        assert retried["status"] == "completed"
+        assert retried["files"] == [
+            {"file": "retry.txt", "status": "succeeded", "chunks_upserted": 1}
+        ]
+        assert cancelled.status_code == 200
+        assert cancelled_job["status"] == "cancelled"
     finally:
         main.app.dependency_overrides.pop(get_settings, None)
         main.app.dependency_overrides.pop(main.get_store, None)
@@ -470,3 +617,20 @@ async def test_load_directory_reports_per_file_and_overall_status(tmp_path: Path
     assert ingested[0].tenant_id == "tenant-a"
     assert events[-1]["stage"] == "completed_with_errors"
     assert any(event["stage"] == "file_failed" for event in events)
+
+    retry_summary = await load_directory(
+        LoaderOptions(
+            directory=tmp_path,
+            tenant_id="tenant-a",
+            include_extensions=("txt",),
+            file_paths=("bad.txt",),
+        ),
+        FakeParser(),
+        ingest,
+    )
+
+    assert retry_summary.eligible == 1
+    assert retry_summary.skipped == 2
+    assert retry_summary.processed == 1
+    assert retry_summary.failed == 1
+    assert len(ingested) == 1
