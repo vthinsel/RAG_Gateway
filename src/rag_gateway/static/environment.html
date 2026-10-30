@@ -230,7 +230,7 @@
         const data = await response.json();
         if (!response.ok) {
           if (response.status === 401) {
-            throw new Error("GATEWAY_API_KEY was rejected. Use the key currently loaded by the running Gateway; restart after rotating it. A process-manager environment variable overrides the value in .env.");
+            throw new Error("GATEWAY_API_KEY was rejected. Use the key currently loaded by the running Gateway; restart after rotating it.");
           }
           throw new Error(data.detail || `Request failed (${response.status})`);
         }

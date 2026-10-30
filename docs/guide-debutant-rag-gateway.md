@@ -294,7 +294,7 @@ Toutes les routes de compatibilité `/v1` demandent le même bearer token de la 
 
 ## 7. Configuration et limites à connaître
 
-Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs de départ. Le chargeur web est contrôlé par `DOCUMENT_LOADER_ENABLED`, `DOCUMENT_LOADER_ROOTS` et `DOCUMENT_LOADER_MAX_ACTIVE_JOBS`. `DOCUMENT_PARSER_MODEL` et `DOCUMENT_PARSER_TIMEOUT_SECONDS` règlent le parseur Ollama. Parmi les autres paramètres importants :
+Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs de départ. Le déploiement `infra/rag-gateway-compose.yaml` donne la priorité aux paramètres enregistrés dans `.env` afin qu'ils persistent après un redémarrage du conteneur ; les variables d'environnement Compose servent de valeurs initiales. Le chargeur web est contrôlé par `DOCUMENT_LOADER_ENABLED`, `DOCUMENT_LOADER_ROOTS` et `DOCUMENT_LOADER_MAX_ACTIVE_JOBS`. `DOCUMENT_PARSER_MODEL` et `DOCUMENT_PARSER_TIMEOUT_SECONDS` règlent le parseur Ollama. Parmi les autres paramètres importants :
 
 | Paramètre | Rôle |
 | --- | --- |

@@ -75,6 +75,31 @@ def test_save_settings_refuses_symlinked_env_file(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "KEEP=value\n"
 
 
+def test_dotenv_overrides_environment_when_precedence_is_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("MONGODB_DATABASE=persisted_value\n", encoding="utf-8")
+    monkeypatch.setenv("MONGODB_DATABASE", "compose_value")
+    monkeypatch.setenv("RAG_GATEWAY_DOTENV_PRECEDENCE", "true")
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.mongodb_database == "persisted_value"
+
+
+def test_environment_overrides_dotenv_by_default(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("MONGODB_DATABASE=dotenv_value\n", encoding="utf-8")
+    monkeypatch.setenv("MONGODB_DATABASE", "environment_value")
+    monkeypatch.delenv("RAG_GATEWAY_DOTENV_PRECEDENCE", raising=False)
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.mongodb_database == "environment_value"
+
+
 def test_environment_api_requires_admin_and_persists_updates(
     tmp_path: Path,
     monkeypatch,

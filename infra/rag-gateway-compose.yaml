@@ -1,0 +1,95 @@
+name: rag-gateway
+
+services:
+  rag-gateway:
+    image: rag_gateway-rag-gateway:latest
+    pull_policy: never
+    restart: unless-stopped
+
+    working_dir: /var/lib/rag-gateway
+
+    volumes:
+      - /var/snap/docker/common/rag-gateway/state:/var/lib/rag-gateway
+
+
+    environment:
+      # Persisted settings saved through the admin UI override these environment defaults.
+      RAG_GATEWAY_DOTENV_PRECEDENCE: "true"
+
+      # Authentification
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Missing gateway API key}
+      API_KEY_REGISTRY: '${API_KEY_REGISTRY:-{}}'
+
+      # MongoDB Atlas
+      MONGODB_URI: ${MONGODB_URI:?Missing MongoDB URI}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-rag_gateway}
+      MONGODB_COLLECTION: ${MONGODB_COLLECTION:-chunks}
+      ATLAS_VECTOR_INDEX: ${ATLAS_VECTOR_INDEX:-rag_chunks_vector}
+
+      # MongoDB AI Models API
+      MONGODB_API_MODEL_ENDPOINT: ${MONGODB_API_MODEL_ENDPOINT:-ai.mongodb.com}
+      MONGODB_API_KEY: ${MONGODB_API_KEY:?Missing MongoDB model API key}
+      VOYAGE_EMBEDDING_MODEL: ${VOYAGE_EMBEDDING_MODEL:-voyage-3.5}
+      EMBEDDING_DIMENSIONS: "1024"
+      EMBEDDING_BATCH_SIZE: "64"
+
+      # Ollama sur NAS TrueNAS
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?Missing ollama URL}
+      OLLAMA_DOCKER_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:?Missing ollama URL}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
+      PUBLIC_MODEL_NAME: rag-local
+
+      # RAG
+      DEFAULT_TENANT_ID: default
+      CHUNK_SIZE: "1200"
+      CHUNK_OVERLAP: "150"
+      RETRIEVAL_TOP_K: "5"
+      RETRIEVAL_NUM_CANDIDATES: "100"
+      MAX_DOCUMENT_CHARS: "1000000"
+      MAX_QUERY_CHARS: "8000"
+      UPSTREAM_TIMEOUT_SECONDS: "180"
+
+      # Document loader et OCR
+      DOCUMENT_LOADER_ENABLED: "true"
+      DOCUMENT_LOADER_ROOTS: "[]"
+      DOCUMENT_LOADER_MAX_ACTIVE_JOBS: "3"
+      DOCUMENT_PARSER_MODEL: glm-ocr:latest
+      DOCUMENT_PARSER_TIMEOUT_SECONDS: "300"
+
+      # FastAPI
+      GATEWAY_BIND_ADDRESS: 0.0.0.0
+      GATEWAY_PORT: "8000"
+
+      # SQLite sur volume persistant
+      OPERATIONS_DB_PATH: /var/lib/rag-gateway/data/rag_gateway_operations.sqlite3
+
+
+    networks:
+      traefik-net:
+        aliases:
+          - rag-gateway
+
+    expose:
+      - "8000"
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+
+      # HTTPS
+      - "traefik.http.routers.rag.rule=Host(`rag.yourdomain`)"
+      - "traefik.http.routers.rag.entrypoints=web-secure"
+      - "traefik.http.routers.rag.tls=true"
+      - "traefik.http.routers.rag.tls.certresolver=ovh"
+      - "traefik.http.routers.rag.service=rag"
+      
+      # Accès depuis le LAN et les VPN autorisés
+      - "traefik.http.routers.rag.middlewares=rag-lan@docker"
+
+      # Service existant
+      - "traefik.http.services.rag.loadbalancer.server.port=8000"
+
+
+networks:
+  traefik-net:
+    external: true
