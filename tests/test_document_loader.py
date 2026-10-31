@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pymongo.errors import PyMongoError
 
 from rag_gateway import main
 from rag_gateway.config import Settings, get_settings
@@ -507,7 +508,7 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         async with main.lifespan(main.app):
-            pass
+            await main.app.state.integration_task
 
     assert "Ollama connection check succeeded; discovered models:" in caplog.text
     assert "Configured Ollama document parser model 'glm-ocr:latest' is installed" in caplog.text
@@ -523,6 +524,62 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
     assert captured_requests[0].url == "https://ai.mongodb.com/v1/embeddings"
     assert captured_requests[0].headers["Authorization"] == "Bearer " + settings.mongodb_api_key
     assert "startup-test-key" not in caplog.text
+
+
+async def test_lifespan_starts_when_optional_integrations_are_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        mongodb_uri="mongodb://atlas.test",
+        mongodb_api_key="startup-test-key",
+        operations_db_path=tmp_path / "operations.sqlite3",
+    )
+    original_async_client = httpx.AsyncClient
+
+    def mock_async_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(
+            lambda _request: httpx.Response(503)
+        )
+        return original_async_client(*args, **kwargs)
+
+    class UnavailableStore:
+        def __init__(self, _settings: Settings) -> None:
+            pass
+
+        def ping(self) -> bool:
+            raise PyMongoError("Atlas is unavailable")
+
+        def close(self) -> None:
+            pass
+
+    class UnavailableParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            raise httpx.ConnectError("Ollama is unavailable")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "AtlasStore", UnavailableStore)
+    monkeypatch.setattr(main, "OllamaDocumentParser", UnavailableParser)
+    monkeypatch.setattr(main.httpx, "AsyncClient", mock_async_client)
+
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        async with main.lifespan(main.app):
+            assert await main.health() == {"status": "ok"}
+            await main.app.state.integration_task
+            assert main.app.state.store is None
+            assert main.app.state.atlas_status == "unavailable"
+
+    assert "Atlas store initialization failed" in caplog.text
+    assert "MongoDB AI API model check failed" in caplog.text
+    assert "Ollama model discovery failed" in caplog.text
 
 
 def test_ollama_parser_sends_image_and_ocr_prompt() -> None:

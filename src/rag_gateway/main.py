@@ -133,25 +133,7 @@ async def _check_mongodb_ai_model_api(settings: Settings, client: httpx.AsyncCli
         )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    app.state.operations = await run_in_threadpool(OperationsStore, settings.operations_db_path)
-    logger.info(
-        "Gateway authentication configuration: cwd=%s dotenv=%s dotenv_exists=%s "
-        "gateway_key_configured=%s process_env_override=%s registry_entries=%s",
-        Path.cwd(),
-        Path.cwd() / ".env",
-        (Path.cwd() / ".env").is_file(),
-        bool(settings.gateway_api_key),
-        "GATEWAY_API_KEY" in os.environ,
-        len(settings.api_key_registry),
-    )
-    app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout_seconds)
-    app.state.store = None
-    app.state.document_loader_tasks = set()
-    app.state.document_loader_job_tasks = {}
-    atlas_error: PyMongoError | None = None
+async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
     if settings.mongodb_uri:
         logger.info(
             "Starting MongoDB Atlas connection check: host=%s database=%s collection=%s",
@@ -169,6 +151,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings.mongodb_database,
                 settings.mongodb_collection,
             )
+            app.state.atlas_status = "connected"
             try:
                 index_exists, index_queryable = await run_in_threadpool(
                     app.state.store.vector_index_status
@@ -212,10 +195,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except PyMongoError as error:
             logger.error("Atlas store initialization failed (%s): %s", type(error).__name__, error)
             logger.debug("Atlas store initialization details", exc_info=error)
+            app.state.atlas_status = "unavailable"
             if app.state.store is not None:
                 await run_in_threadpool(app.state.store.close)
                 app.state.store = None
-            atlas_error = error
     else:
         logger.warning("MongoDB Atlas connection check skipped: MONGODB_URI is not configured")
 
@@ -261,15 +244,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     finally:
         parser.close()
-    if atlas_error is not None:
-        await app.state.http.aclose()
-        raise atlas_error
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    app.state.operations = await run_in_threadpool(OperationsStore, settings.operations_db_path)
+    logger.info(
+        "Gateway authentication configuration: cwd=%s dotenv=%s dotenv_exists=%s "
+        "gateway_key_configured=%s process_env_override=%s registry_entries=%s",
+        Path.cwd(),
+        Path.cwd() / ".env",
+        (Path.cwd() / ".env").is_file(),
+        bool(settings.gateway_api_key),
+        "GATEWAY_API_KEY" in os.environ,
+        len(settings.api_key_registry),
+    )
+    app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout_seconds)
+    app.state.store = None
+    app.state.atlas_status = "connecting" if settings.mongodb_uri else "not_configured"
+    app.state.document_loader_tasks = set()
+    app.state.document_loader_job_tasks = {}
+    app.state.integration_task = asyncio.create_task(_initialize_integrations(app, settings))
+
+    def log_integration_failure(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            if app.state.atlas_status == "connecting":
+                app.state.atlas_status = "unavailable"
+            logger.error(
+                "Optional integration initialization failed: %s",
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    app.state.integration_task.add_done_callback(log_integration_failure)
     yield
     active_tasks = tuple(app.state.document_loader_tasks)
     for task in active_tasks:
         task.cancel()
     if active_tasks:
         await asyncio.gather(*active_tasks, return_exceptions=True)
+    app.state.integration_task.cancel()
+    await asyncio.gather(app.state.integration_task, return_exceptions=True)
     if app.state.store is not None:
         await run_in_threadpool(app.state.store.close)
     await app.state.http.aclose()
@@ -353,7 +372,13 @@ def require_environment_admin(
 def get_store(request: Request) -> AtlasStore:
     store = getattr(request.app.state, "store", None)
     if store is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is not configured")
+        status = getattr(request.app.state, "atlas_status", "not_configured")
+        detail = (
+            "MongoDB Atlas is not configured"
+            if status == "not_configured"
+            else "MongoDB Atlas is unavailable"
+        )
+        raise HTTPException(status_code=503, detail=detail)
     return store
 
 
@@ -391,6 +416,14 @@ async def metrics(_: list[str] | None = Depends(require_api_key)) -> Response:
     return Response(
         content=request_metrics.prometheus(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
+@app.get("/v1/admin/monitoring", include_in_schema=False)
+async def monitoring_snapshot(_: None = Depends(require_environment_admin)) -> JSONResponse:
+    return JSONResponse(
+        content=request_metrics.snapshot(),
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -441,7 +474,7 @@ async def gateway_status(
             status["vector_index"]["status"] = "unavailable"
             logger.warning("Gateway status Atlas check failed (%s)", type(error).__name__)
     else:
-        status["atlas"] = {"status": "not_configured"}
+        status["atlas"] = {"status": request.app.state.atlas_status}
         status["vector_index"]["status"] = "unavailable"
 
     parser = OllamaDocumentParser(
@@ -472,7 +505,7 @@ async def gateway_status(
     if not all(components):
         status["status"] = (
             "not_ready"
-            if status["atlas"]["status"] in {"not_configured", "error"}
+            if status["atlas"]["status"] in {"not_configured", "connecting", "unavailable", "error"}
             or status["vector_index"]["status"] in {"missing", "unavailable"}
             else "degraded"
         )
@@ -484,7 +517,7 @@ async def readiness(request: Request) -> JSONResponse:
     store = getattr(request.app.state, "store", None)
     settings = get_settings()
     missing_configuration = []
-    if store is None:
+    if not settings.mongodb_uri:
         missing_configuration.append("MONGODB_URI")
     if not (settings.gateway_api_key or settings.api_key_registry):
         missing_configuration.append("GATEWAY_API_KEY or API_KEY_REGISTRY")
@@ -492,6 +525,8 @@ async def readiness(request: Request) -> JSONResponse:
         missing_configuration.append("MONGODB_API_KEY")
     if missing_configuration:
         logger.warning("Readiness check missing configuration: %s", ", ".join(missing_configuration))
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
+    if store is None:
         return JSONResponse(status_code=503, content={"status": "not_ready"})
     try:
         await run_in_threadpool(store.ping)
@@ -516,6 +551,11 @@ async def evaluation_ui() -> FileResponse:
 @app.get("/tools/playground", include_in_schema=False)
 async def playground_ui() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "playground.html")
+
+
+@app.get("/tools/monitoring", include_in_schema=False)
+async def monitoring_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "monitoring.html")
 
 
 @app.get("/tools/environment", include_in_schema=False)

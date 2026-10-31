@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live API monitoring</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --green-soft: #dcefe5;
+      --red: #a63d35;
+      --red-soft: #f8e4df;
+      --yellow: #f0c663;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 "Segoe UI", "Aptos", sans-serif; }
+    header { background: #153b3e; color: #f6f8f3; padding: 28px max(24px, calc((100vw - 1180px) / 2)); border-bottom: 5px solid var(--yellow); }
+    header h1 { margin: 0; font-size: 25px; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1180px; margin: 28px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; margin-bottom: 18px; }
+    h2 { font-size: 17px; margin: 0 0 14px; }
+    .connect { display: grid; grid-template-columns: minmax(200px, 1fr) auto auto; align-items: end; gap: 10px; }
+    .field { display: grid; gap: 5px; }
+    label { color: #294549; font-size: 13px; font-weight: 650; }
+    input { width: 100%; min-height: 40px; border: 1px solid #afc1ba; border-radius: 4px; background: #fff; color: var(--ink); padding: 8px 10px; font: inherit; }
+    input:focus, button:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
+    button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: #fff; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--green); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .note, #message { color: var(--muted); font-size: 13px; margin: 11px 0 0; }
+    #message { min-height: 21px; color: var(--red); }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .metric { border: 1px solid var(--line); border-radius: 5px; padding: 12px; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; font-size: 23px; font-variant-numeric: tabular-nums; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    td { font-size: 13px; }
+    code { font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .method { font-weight: 700; }
+    .status { display: inline-block; border-radius: 4px; padding: 2px 7px; background: var(--green-soft); color: var(--green); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .status.bad { background: var(--red-soft); color: var(--red); }
+    .status.pending { background: #f7efcf; color: #735a11; }
+    .empty { color: var(--muted); font-style: italic; }
+    .table-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    #updated { color: var(--muted); font-size: 12px; }
+    a { color: var(--green); }
+    @media (max-width: 680px) {
+      header { padding: 22px 18px; }
+      main { margin-top: 18px; padding: 0 12px 24px; }
+      section { padding: 16px; }
+      .connect { grid-template-columns: 1fr 1fr; }
+      .connect .field { grid-column: 1 / -1; }
+      .table-head { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Live API monitoring</h1>
+    <p>Recent gateway activity, response status, and request duration.</p>
+  </header>
+  <main>
+    <section aria-labelledby="access-title">
+      <h2 id="access-title">Administrator access</h2>
+      <div class="connect">
+        <div class="field">
+          <label for="token">Gateway administrator token</label>
+          <input id="token" type="password" autocomplete="off" placeholder="GATEWAY_API_KEY">
+        </div>
+        <button id="connect" type="button">Connect</button>
+        <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
+      </div>
+      <p class="note">The token stays in this page's memory and is not saved. Request bodies and query-string values are never captured; only matched route templates are shown.</p>
+      <p id="message" role="status" aria-live="polite">Enter the gateway administrator token to start monitoring.</p>
+    </section>
+    <section aria-labelledby="summary-title">
+      <div class="table-head">
+        <h2 id="summary-title">Gateway activity</h2>
+        <span id="updated"></span>
+      </div>
+      <div class="summary" aria-live="polite">
+        <div class="metric"><span>Total requests since process start</span><strong id="total">—</strong></div>
+        <div class="metric"><span>Requests currently in flight</span><strong id="active">—</strong></div>
+        <div class="metric"><span>Failed responses (4xx/5xx)</span><strong id="failed">—</strong></div>
+        <div class="metric"><span>Recent average duration</span><strong id="average">—</strong></div>
+      </div>
+    </section>
+    <section aria-labelledby="recent-title">
+      <div class="table-head">
+        <h2 id="recent-title">In-flight and recent requests</h2>
+        <span class="note">Refreshes every 1.5 seconds · up to 500 completed calls retained in memory</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Status</th><th>Duration</th><th>Request ID</th></tr></thead>
+          <tbody id="requests"><tr><td class="empty" colspan="6">Connect to view activity.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section aria-labelledby="routes-title">
+      <h2 id="routes-title">Requests by route</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Method</th><th>Route</th><th>Calls</th><th>Failures</th><th>Average duration</th></tr></thead>
+          <tbody id="routes"><tr><td class="empty" colspan="5">Connect to view route totals.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <p class="note"><a href="/">Back to gateway dashboard</a></p>
+  </main>
+  <script>
+    const tokenInput = document.querySelector("#token");
+    const connectButton = document.querySelector("#connect");
+    const disconnectButton = document.querySelector("#disconnect");
+    const message = document.querySelector("#message");
+    const requestRows = document.querySelector("#requests");
+    const routeRows = document.querySelector("#routes");
+    let token = "";
+    let timer = 0;
+
+    function cell(row, value, className = "") {
+      const item = document.createElement("td");
+      item.textContent = value;
+      if (className) item.className = className;
+      row.append(item);
+      return item;
+    }
+
+    function renderRequests(items) {
+      requestRows.replaceChildren();
+      if (!items.length) {
+        const row = requestRows.insertRow();
+        cell(row, "No API calls recorded yet.", "empty");
+        row.firstChild.colSpan = 6;
+        return;
+      }
+      for (const item of items) {
+        const row = requestRows.insertRow();
+        cell(row, new Date(item.timestamp).toLocaleTimeString());
+        cell(row, item.method, "method");
+        const route = cell(row, "");
+        const routeCode = document.createElement("code");
+        routeCode.textContent = item.route;
+        route.append(routeCode);
+        const status = cell(row, String(item.status), "status");
+        if (item.status === "in progress") status.classList.add("pending");
+        else if (Number(item.status) >= 400) status.classList.add("bad");
+        cell(row, `${Number(item.duration_ms).toFixed(2)} ms`);
+        cell(row, item.request_id, "request-id");
+      }
+    }
+
+    function renderRoutes(items) {
+      routeRows.replaceChildren();
+      const sorted = [...items].sort((a, b) => b.requests - a.requests).slice(0, 30);
+      if (!sorted.length) {
+        const row = routeRows.insertRow();
+        cell(row, "No completed API calls recorded yet.", "empty");
+        row.firstChild.colSpan = 5;
+        return;
+      }
+      for (const item of sorted) {
+        const row = routeRows.insertRow();
+        cell(row, item.method, "method");
+        const route = cell(row, "");
+        const routeCode = document.createElement("code");
+        routeCode.textContent = item.route;
+        route.append(routeCode);
+        cell(row, String(item.requests));
+        cell(row, String(item.errors), item.errors ? "status bad" : "status");
+        cell(row, `${Number(item.average_duration_ms).toFixed(2)} ms`);
+      }
+    }
+
+    async function refresh() {
+      if (!token) return;
+      try {
+        const response = await fetch("/v1/admin/monitoring", {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store"
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `Monitoring request failed (${response.status})`);
+        document.querySelector("#total").textContent = Number(data.requests_total).toLocaleString();
+        document.querySelector("#active").textContent = Number(data.requests_in_flight).toLocaleString();
+        document.querySelector("#failed").textContent = Number(data.requests_failed).toLocaleString();
+        document.querySelector("#average").textContent = `${Number(data.recent_average_duration_ms).toFixed(2)} ms`;
+        renderRequests(data.recent_requests);
+        renderRoutes(data.routes);
+        document.querySelector("#updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        message.textContent = "Connected. Monitoring is live.";
+        message.style.color = "var(--green)";
+        timer = window.setTimeout(refresh, 1500);
+      } catch (error) {
+        token = "";
+        connectButton.disabled = false;
+        disconnectButton.disabled = true;
+        message.textContent = error.message;
+        message.style.color = "var(--red)";
+      }
+    }
+
+    connectButton.addEventListener("click", () => {
+      token = tokenInput.value.trim();
+      if (!token) {
+        message.textContent = "Enter the gateway administrator token.";
+        message.style.color = "var(--red)";
+        return;
+      }
+      window.clearTimeout(timer);
+      connectButton.disabled = true;
+      disconnectButton.disabled = false;
+      refresh();
+    });
+
+    disconnectButton.addEventListener("click", () => {
+      token = "";
+      window.clearTimeout(timer);
+      connectButton.disabled = false;
+      disconnectButton.disabled = true;
+      message.textContent = "Monitoring disconnected.";
+      message.style.color = "var(--muted)";
+      requestRows.replaceChildren();
+      routeRows.replaceChildren();
+      document.querySelector("#updated").textContent = "";
+    });
+
+    tokenInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") connectButton.click();
+    });
+  </script>
+</body>
+</html>

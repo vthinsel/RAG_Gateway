@@ -1,9 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from rag_gateway.observability import ObservabilityMiddleware, request_metrics
+from rag_gateway.observability import ObservabilityMiddleware, RequestMetrics, request_metrics
 from rag_gateway.operations import OperationsStore
 
 
@@ -95,10 +96,44 @@ def test_observability_middleware_adds_request_id_and_exports_metrics() -> None:
 
     before = request_metrics.prometheus()
     with TestClient(test_app) as client:
-        response = client.get("/probe", headers={"X-Request-ID": "client.trace-1"})
+        response = client.get(
+            "/probe?private-search=must-not-be-recorded",
+            headers={"X-Request-ID": "client.trace-1"},
+        )
 
     assert response.status_code == 200
     assert response.headers["x-request-id"] == "client.trace-1"
     assert 'route="/probe"' in request_metrics.prometheus()
     assert "rag_gateway_http_request_duration_seconds_count" in request_metrics.prometheus()
     assert request_metrics.prometheus() != before
+    snapshot = request_metrics.snapshot()
+    observed = next(
+        item for item in snapshot["recent_requests"] if item["request_id"] == "client.trace-1"
+    )
+    assert observed["route"] == "/probe"
+    assert observed["status"] == 200
+    assert observed["duration_ms"] >= 0
+    assert "must-not-be-recorded" not in repr(snapshot)
+
+
+def test_request_metrics_exposes_in_flight_requests() -> None:
+    metrics = RequestMetrics()
+    scope = {
+        "type": "http",
+        "path": "/v1/chat/completions",
+        "route": SimpleNamespace(path="/v1/chat/completions"),
+    }
+
+    metrics.begin("chat-request", "POST", scope)
+    active = metrics.snapshot()
+
+    assert active["requests_in_flight"] == 1
+    assert active["recent_requests"][0]["status"] == "in progress"
+    assert active["recent_requests"][0]["route"] == "/v1/chat/completions"
+
+    metrics.observe("POST", "/v1/chat/completions", 200, 0.025, request_id="chat-request")
+    completed = metrics.snapshot()
+
+    assert completed["requests_in_flight"] == 0
+    assert completed["recent_requests"][0]["status"] == 200
+    assert completed["recent_requests"][0]["duration_ms"] == 25
