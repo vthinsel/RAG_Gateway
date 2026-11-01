@@ -30,6 +30,50 @@ class DocumentLoaderRequest(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=256)
 
 
+class OllamaModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1, max_length=256)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(character in value for character in "\r\n"):
+            raise ValueError("Model name must not be blank or contain line breaks")
+        return value
+
+
+class OllamaCopyModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1, max_length=256)
+    destination: str = Field(min_length=1, max_length=256)
+
+    @field_validator("source", "destination")
+    @classmethod
+    def validate_model_names(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(character in value for character in "\r\n"):
+            raise ValueError("Model names must not be blank or contain line breaks")
+        return value
+
+
+class OllamaContextVariantRequest(OllamaModelRequest):
+    context_size: int = Field(gt=0)
+    name: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("name")
+    @classmethod
+    def validate_variant_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(character in value for character in "\r\n"):
+            raise ValueError("Variant name must not be blank or contain line breaks")
+        return value
+
+
 class RetrievalEvaluationCase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

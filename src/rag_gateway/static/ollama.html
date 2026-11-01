@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ollama management</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17292c;
+      --muted: #587074;
+      --paper: #f3f6f2;
+      --panel: #fff;
+      --line: #d3ded7;
+      --green: #176f5b;
+      --red: #a63d35;
+      font: 15px/1.5 "Segoe UI", "Aptos", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); }
+    header { background: #153b3e; color: #f6f8f3; padding: 24px max(20px, calc((100vw - 1060px) / 2)); }
+    header h1 { margin: 0; font-size: 24px; }
+    header p { margin: 4px 0 0; color: #c5d8d1; }
+    main { max-width: 1060px; margin: 24px auto; padding: 0 20px 36px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; margin-bottom: 16px; }
+    h2 { font-size: 17px; margin: 0 0 12px; }
+    .controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+    .field { flex: 1; min-width: 190px; }
+    label { display: block; color: #294549; font-size: 13px; font-weight: 650; }
+    input { width: 100%; min-height: 40px; margin-top: 4px; border: 1px solid #afc1ba; border-radius: 4px; padding: 8px 10px; font: inherit; }
+    button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: white; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: white; color: var(--green); }
+    button.danger { background: var(--red); border-color: var(--red); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .muted { color: var(--muted); font-size: 13px; }
+    #message { min-height: 24px; margin: 10px 0 0; white-space: pre-wrap; }
+    .error { color: var(--red); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #e4ebe6; text-align: left; vertical-align: middle; }
+    th { color: #294549; font-size: 13px; }
+    td.model { overflow-wrap: anywhere; }
+    td.actions { text-align: right; white-space: nowrap; }
+    td.actions button { min-height: 34px; padding: 4px 9px; margin: 2px; }
+    pre { max-height: 420px; overflow: auto; padding: 12px; border-radius: 4px; background: #edf2ee; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 640px) {
+      header { padding: 20px; }
+      main { padding: 0 12px 24px; }
+      section { padding: 14px; }
+      td.actions { white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ollama management</h1>
+    <p>Manage models and inspect the Ollama server configured for this Gateway.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Administrator connection</h2>
+      <div class="controls">
+        <div class="field">
+          <label for="token">Gateway administrator bearer key</label>
+          <input id="token" type="password" autocomplete="off" placeholder="GATEWAY_API_KEY">
+        </div>
+        <button id="refresh" type="button">Refresh models</button>
+      </div>
+      <p class="muted">Model changes require the administrator key. The key stays in this page and is not saved.</p>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section>
+      <h2>Pull a model</h2>
+      <form id="pull-form" class="controls">
+        <div class="field">
+          <label for="pull-model">Model name and optional tag</label>
+          <input id="pull-model" required maxlength="256" placeholder="qwen2.5:7b">
+        </div>
+        <button type="submit">Pull model</button>
+      </form>
+    </section>
+    <section>
+      <h2>Copy a model</h2>
+      <form id="copy-form" class="controls">
+        <div class="field">
+          <label for="copy-source">Source model</label>
+          <input id="copy-source" required maxlength="256" list="model-names">
+        </div>
+        <div class="field">
+          <label for="copy-destination">New model name</label>
+          <input id="copy-destination" required maxlength="256">
+        </div>
+        <button type="submit">Copy model</button>
+      </form>
+    </section>
+    <section>
+      <h2>Create a context variant</h2>
+      <form id="context-form" class="controls">
+        <div class="field">
+          <label for="context-model">Source model</label>
+          <input id="context-model" required maxlength="256" list="model-names">
+        </div>
+        <div class="field">
+          <label for="context-size">Context window (tokens)</label>
+          <input id="context-size" type="number" min="1" step="1" required placeholder="8192">
+        </div>
+        <div class="field">
+          <label for="context-name">Variant name (optional)</label>
+          <input id="context-name" maxlength="256" placeholder="Defaults to source-ctx<size>">
+        </div>
+        <button type="submit">Create variant</button>
+      </form>
+      <p class="muted">Creates a new model from the selected source with the requested <code>num_ctx</code> parameter.</p>
+    </section>
+    <section>
+      <h2>Installed models</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model</th><th>Size</th><th>Family</th><th>Actions</th></tr></thead>
+          <tbody id="models"><tr><td colspan="4" class="muted">Connect and refresh to list models.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>Currently running models</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model</th><th>Size</th><th>Context length</th><th>Actions</th></tr></thead>
+          <tbody id="running"><tr><td colspan="4" class="muted">Connect and refresh to list running models.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>Model details / last operation</h2>
+      <pre id="details" aria-live="polite">Model details and operation results will appear here.</pre>
+    </section>
+    <datalist id="model-names"></datalist>
+    <p class="muted"><a href="/">Back to Gateway dashboard</a></p>
+  </main>
+  <script>
+    const tokenInput = document.querySelector("#token");
+    const message = document.querySelector("#message");
+    const modelBody = document.querySelector("#models");
+    const runningBody = document.querySelector("#running");
+    const modelNames = document.querySelector("#model-names");
+    const details = document.querySelector("#details");
+
+    function showMessage(text, failed = false) {
+      message.textContent = text;
+      message.classList.toggle("error", failed);
+    }
+
+    async function api(path, method = "GET", payload) {
+      const options = {
+        method,
+        headers: { "Authorization": `Bearer ${tokenInput.value.trim()}` }
+      };
+      if (payload !== undefined) {
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(payload);
+      }
+      const response = await fetch(path, options);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail || result);
+        throw new Error(detail || `Request failed (${response.status})`);
+      }
+      return result;
+    }
+
+    function makeButton(label, action, style = "secondary") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = style;
+      button.textContent = label;
+      button.addEventListener("click", action);
+      return button;
+    }
+
+    async function operate(label, path, method = "POST", payload) {
+      showMessage(`${label}...`);
+      try {
+        const result = await api(path, method, payload);
+        const changesModels = ["/pull", "/copy", "/context", "/delete", "/stop"].some(
+          suffix => path.endsWith(suffix)
+        );
+        if (changesModels) {
+          const refreshed = await refreshModels(false);
+          details.textContent = JSON.stringify(result, null, 2);
+          showMessage(
+            refreshed ? `${label} completed.` : `${label} completed, but refreshing models failed.`,
+            !refreshed
+          );
+        } else {
+          details.textContent = JSON.stringify(result, null, 2);
+          showMessage(`${label} completed.`);
+        }
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    function renderModels(models) {
+      modelBody.replaceChildren();
+      modelNames.replaceChildren();
+      if (!models.length) {
+        const row = modelBody.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 4;
+        cell.className = "muted";
+        cell.textContent = "No models installed.";
+        return;
+      }
+      for (const model of models) {
+        const name = model.name || model.model || "unknown";
+        const option = document.createElement("option");
+        option.value = name;
+        modelNames.append(option);
+        const row = modelBody.insertRow();
+        for (const value of [
+          name,
+          model.size ? `${(model.size / (1024 ** 3)).toFixed(2)} GB` : "-",
+          model.details?.family || "-"
+        ]) {
+          const cell = row.insertCell();
+          cell.className = "model";
+          cell.textContent = String(value);
+        }
+        const actions = row.insertCell();
+        actions.className = "actions";
+        actions.append(
+          makeButton("Show", () => operate(`Showing ${name}`, "/v1/admin/ollama/show", "POST", { model: name })),
+          makeButton("Delete", () => {
+            if (window.confirm(`Permanently delete model ${name} from Ollama?`)) {
+              operate(`Deleting ${name}`, "/v1/admin/ollama/delete", "POST", { model: name });
+            }
+          }, "danger")
+        );
+      }
+    }
+
+    function renderRunning(models) {
+      runningBody.replaceChildren();
+      if (!models.length) {
+        const row = runningBody.insertRow();
+        const cell = row.insertCell();
+        cell.colSpan = 4;
+        cell.className = "muted";
+        cell.textContent = "No models are currently running.";
+        return;
+      }
+      for (const model of models) {
+        const name = model.name || model.model || "unknown";
+        const row = runningBody.insertRow();
+        for (const value of [
+          name,
+          model.size ? `${(model.size / (1024 ** 3)).toFixed(2)} GB` : "-",
+          model.context_length || model.details?.context_length || "-"
+        ]) {
+          const cell = row.insertCell();
+          cell.className = "model";
+          cell.textContent = String(value);
+        }
+        const actions = row.insertCell();
+        actions.className = "actions";
+        actions.append(makeButton("Stop", () => {
+          operate(`Stopping ${name}`, "/v1/admin/ollama/stop", "POST", { model: name });
+        }));
+      }
+    }
+
+    async function refreshModels(announce = true) {
+      if (announce) showMessage("Loading models and server status...");
+      try {
+        const [installed, running, version] = await Promise.all([
+          api("/v1/admin/ollama/models"),
+          api("/v1/admin/ollama/running"),
+          api("/v1/admin/ollama/version")
+        ]);
+        renderModels(installed.models || []);
+        renderRunning(running.models || []);
+        if (announce) {
+          details.textContent = JSON.stringify({ version }, null, 2);
+          showMessage(`Connected to Ollama ${version.version || ""}.`);
+        }
+        return true;
+      } catch (error) {
+        showMessage(error.message, true);
+        return false;
+      }
+    }
+
+    document.querySelector("#pull-form").addEventListener("submit", event => {
+      event.preventDefault();
+      operate(`Pulling ${document.querySelector("#pull-model").value}`, "/v1/admin/ollama/pull", "POST", {
+        model: document.querySelector("#pull-model").value
+      });
+    });
+    document.querySelector("#copy-form").addEventListener("submit", event => {
+      event.preventDefault();
+      operate("Copying model", "/v1/admin/ollama/copy", "POST", {
+        source: document.querySelector("#copy-source").value,
+        destination: document.querySelector("#copy-destination").value
+      });
+    });
+    document.querySelector("#context-form").addEventListener("submit", event => {
+      event.preventDefault();
+      const name = document.querySelector("#context-name").value.trim();
+      const payload = {
+        model: document.querySelector("#context-model").value,
+        context_size: Number(document.querySelector("#context-size").value)
+      };
+      if (name) payload.name = name;
+      operate("Creating context variant", "/v1/admin/ollama/context", "POST", payload);
+    });
+    document.querySelector("#refresh").addEventListener("click", refreshModels);
+  </script>
+</body>
+</html>

@@ -51,6 +51,9 @@ from rag_gateway.models import (
     DocumentLoaderRequest,
     IngestDocument,
     IngestResult,
+    OllamaContextVariantRequest,
+    OllamaCopyModelRequest,
+    OllamaModelRequest,
     RetrievalEvaluationRequest,
 )
 from rag_gateway.observability import ObservabilityMiddleware, request_metrics
@@ -224,7 +227,7 @@ async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
         if not models:
             logger.warning("Ollama responded successfully but has no models installed")
         if not any(model.casefold() == settings.ollama_model.casefold() for model in models):
-            logger.warning("Configured Ollama chat model %r is not installed", settings.ollama_model)
+                logger.warning("Configured Ollama chat model %r is not installed", settings.ollama_model)
         else:
             logger.info("Configured Ollama chat model %r is installed", settings.ollama_model)
         if settings.document_loader_enabled and not any(
@@ -301,6 +304,38 @@ app.add_middleware(ObservabilityMiddleware)
 def _require_document_loader(settings: Settings) -> None:
     if not settings.document_loader_enabled:
         raise HTTPException(status_code=404, detail="Document loader is disabled")
+
+
+async def _ollama_admin_request(
+    request: Request,
+    settings: Settings,
+    method: str,
+    endpoint: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base_url = settings.ollama_base_url.rstrip("/").removesuffix("/v1")
+    try:
+        response = await request.app.state.http.request(
+            method,
+            f"{base_url}/api/{endpoint}",
+            json=payload,
+            timeout=1800.0,
+        )
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"Could not connect to Ollama: {error}") from error
+    if not response.is_success:
+        detail = response.text[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ollama returned HTTP {response.status_code}: {detail}",
+        )
+    try:
+        result = response.json()
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail="Ollama returned invalid JSON") from error
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Ollama returned an unexpected response")
+    return result
 
 
 def _resolve_loader_directory(directory: Path, roots: list[Path]) -> Path:
@@ -568,6 +603,11 @@ async def chunks_ui() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "chunks.html")
 
 
+@app.get("/tools/ollama", include_in_schema=False)
+async def ollama_ui() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "ollama.html")
+
+
 @app.get("/v1/admin/environment")
 async def read_environment(
     _admin: None = Depends(require_environment_admin),
@@ -642,6 +682,117 @@ async def update_environment(
         raise HTTPException(status_code=500, detail="Could not persist environment configuration") from error
     logger.info("Environment configuration saved to %s; restart required to apply changes", saved_path)
     return {"saved": True, "restart_required": True, **settings_response(updated_settings)}
+
+
+@app.get("/v1/admin/ollama/models")
+async def admin_ollama_models(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(request, settings, "GET", "tags")
+
+
+@app.get("/v1/admin/ollama/running")
+async def admin_ollama_running(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(request, settings, "GET", "ps")
+
+
+@app.get("/v1/admin/ollama/version")
+async def admin_ollama_version(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(request, settings, "GET", "version")
+
+
+@app.post("/v1/admin/ollama/pull")
+async def admin_ollama_pull(
+    body: OllamaModelRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(
+        request, settings, "POST", "pull", {"name": body.model, "stream": False}
+    )
+
+
+@app.post("/v1/admin/ollama/delete")
+async def admin_ollama_delete(
+    body: OllamaModelRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(request, settings, "DELETE", "delete", {"name": body.model})
+
+
+@app.post("/v1/admin/ollama/copy")
+async def admin_ollama_copy(
+    body: OllamaCopyModelRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(
+        request,
+        settings,
+        "POST",
+        "copy",
+        {"source": body.source, "destination": body.destination},
+    )
+
+
+@app.post("/v1/admin/ollama/context")
+async def admin_ollama_context_variant(
+    body: OllamaContextVariantRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    name = body.name or f"{body.model}-ctx{body.context_size}"
+    modelfile = f"FROM {body.model}\nPARAMETER num_ctx {body.context_size}\n"
+    return await _ollama_admin_request(
+        request,
+        settings,
+        "POST",
+        "create",
+        {"name": name, "modelfile": modelfile, "stream": False},
+    )
+
+
+@app.post("/v1/admin/ollama/show")
+async def admin_ollama_show(
+    body: OllamaModelRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(
+        request, settings, "POST", "show", {"model": body.model}
+    )
+
+
+@app.post("/v1/admin/ollama/stop")
+async def admin_ollama_stop(
+    body: OllamaModelRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _admin: None = Depends(require_environment_admin),
+) -> dict[str, Any]:
+    return await _ollama_admin_request(
+        request,
+        settings,
+        "POST",
+        "generate",
+        {"model": body.model, "keep_alive": 0},
+    )
 
 
 @app.get("/v1/document-loader/models")
