@@ -163,8 +163,10 @@ class AtlasStore:
         query_vector: list[float],
         limit: int,
         query: str | None = None,
+        rerank_enabled: bool | None = None,
     ) -> list[dict[str, Any]]:
-        rerank_enabled = self.settings.retrieval_rerank_enabled
+        if rerank_enabled is None:
+            rerank_enabled = self.settings.retrieval_rerank_enabled
         rerank_limit = max(self.settings.retrieval_rerank_candidates, limit)
         if rerank_enabled and query is None:
             raise ValueError("A text query is required when retrieval reranking is enabled")

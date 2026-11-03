@@ -260,6 +260,37 @@ def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> No
     assert [result["rerank_score"] for result in results] == [0.95, 0.7]
 
 
+def test_vector_search_can_disable_configured_reranking() -> None:
+    class Collection:
+        pipeline: list[dict] | None = None
+
+        def aggregate(self, pipeline: list[dict]) -> list[dict]:
+            self.pipeline = pipeline
+            return []
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        atlas_vector_index="test-index",
+        retrieval_num_candidates=50,
+        retrieval_min_score=0.72,
+        retrieval_rerank_enabled=True,
+        retrieval_rerank_candidates=30,
+    )
+    store.collection = Collection()
+
+    store.search(
+        "tenant-a",
+        [0.1, 0.2],
+        limit=3,
+        query="search terms",
+        rerank_enabled=False,
+    )
+
+    assert store.collection.pipeline is not None
+    assert len(store.collection.pipeline) == 2
+    assert store.collection.pipeline[0]["$vectorSearch"]["limit"] == 3
+
+
 def test_vector_search_requires_query_when_reranking_is_enabled() -> None:
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
@@ -272,6 +303,8 @@ def test_vector_search_requires_query_when_reranking_is_enabled() -> None:
 
 
 async def test_retrieve_context_passes_text_query_to_store() -> None:
+    rerank_options: list[bool | None] = []
+
     class FakeEmbedder:
         async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
             assert texts == ["question text"]
@@ -285,11 +318,13 @@ async def test_retrieve_context_passes_text_query_to_store() -> None:
             query_vector: list[float],
             limit: int,
             query: str | None = None,
+            rerank_enabled: bool | None = None,
         ) -> list[dict[str, Any]]:
             assert tenant_id == "tenant-a"
             assert query_vector == [0.1, 0.2]
             assert limit == 5
             assert query == "question text"
+            rerank_options.append(rerank_enabled)
             return []
 
     results = await retrieve_context(
@@ -299,8 +334,18 @@ async def test_retrieve_context_passes_text_query_to_store() -> None:
         FakeEmbedder(),
         FakeStore(),
     )
+    overridden_results = await retrieve_context(
+        "question text",
+        "tenant-a",
+        Settings(_env_file=None),
+        FakeEmbedder(),
+        FakeStore(),
+        rerank_enabled=True,
+    )
 
     assert results == []
+    assert overridden_results == []
+    assert rerank_options == [None, True]
 
 
 @pytest.mark.parametrize(
@@ -751,7 +796,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         gateway_api_key="playground-admin-key",
         api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
     )
-    searches: list[tuple[str, int]] = []
+    searches: list[tuple[str, int, bool | None]] = []
     upstream_payloads: list[dict[str, Any]] = []
 
     class FakeStore:
@@ -761,8 +806,9 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
             vector: list[float],
             limit: int,
             query: str | None = None,
+            rerank_enabled: bool | None = None,
         ) -> list[dict[str, Any]]:
-            searches.append((tenant_id, limit))
+            searches.append((tenant_id, limit, rerank_enabled))
             return [
                 {
                     "document_id": "guide.md",
@@ -827,6 +873,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                         "messages": [{"role": "user", "content": "When does it open?"}],
                         "top_k": 2,
                         "stream": False,
+                        "rerank_enabled": False,
                     },
                 )
                 tenant_scope_response = client.post(
@@ -853,12 +900,14 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
 
         assert page.status_code == 200
         assert "RAG playground" in page.text
+        assert 'id="rerank-enabled" type="checkbox"' in page.text
+        assert "rerank_enabled: rerankEnabled" in page.text
         assert response.status_code == 200
         assert tenant_scope_response.status_code == 403
         assert invalid_top_k_response.status_code == 422
         assert response.json()["choices"][0]["message"]["content"] == "It opens at 08:00. [S1]"
         assert response.json()["sources"][0]["document_id"] == "guide.md"
-        assert searches == [("tenant-b", 2)]
+        assert searches == [("tenant-b", 2, False)]
         assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]
     finally:
         app.dependency_overrides.pop(get_settings, None)

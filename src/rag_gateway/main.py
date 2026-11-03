@@ -441,6 +441,14 @@ def _requested_top_k(value: Any, default: int) -> int:
     return top_k
 
 
+def _requested_rerank_enabled(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=422, detail="rerank_enabled must be a boolean")
+    return value
+
+
 @app.get("/healthz")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -1491,6 +1499,7 @@ async def retrieve(
         raise HTTPException(status_code=422, detail="query must be a non-empty string")
     tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
     top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
+    rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
     try:
         sources = await retrieve_context(
             query[: settings.max_query_chars],
@@ -1499,6 +1508,7 @@ async def retrieve(
             embedder,
             store,
             top_k,
+            rerank_enabled,
         )
     except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
@@ -1797,9 +1807,12 @@ async def chat_completions(
     if query:
         tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
         top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
+        rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
         try:
-            sources = await retrieve_context(query, tenant_id, settings, embedder, store, top_k)
-        except (httpx.HTTPError, RuntimeError) as error:
+            sources = await retrieve_context(
+                query, tenant_id, settings, embedder, store, top_k, rerank_enabled
+            )
+        except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
             raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
 
     augmented_messages = add_rag_system_message(messages, sources)
