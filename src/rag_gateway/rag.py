@@ -28,6 +28,7 @@ async def retrieve_context(
         tenant_id,
         query_vector,
         top_k if top_k is not None else settings.retrieval_top_k,
+        query=query,
     )
 
 

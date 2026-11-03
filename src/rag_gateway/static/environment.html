@@ -78,6 +78,9 @@
         ["retrieval_top_k", "Retrieval top K", "number"],
         ["retrieval_num_candidates", "Retrieval candidate count", "number"],
         ["retrieval_min_score", "Minimum retrieval score", "number"],
+        ["retrieval_rerank_enabled", "Enable Atlas Native Reranking", "boolean", "Requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings."],
+        ["retrieval_rerank_model", "Reranker model", "text", "Voyage reranker model, for example rerank-2.5."],
+        ["retrieval_rerank_candidates", "Maximum rerank candidates", "number", "Maximum number of vector-search results to pass to the reranker (1-1000)."],
         ["max_document_chars", "Maximum document characters", "number"],
         ["max_query_chars", "Maximum query characters", "number"],
         ["upstream_timeout_seconds", "Upstream timeout (seconds)", "number"]

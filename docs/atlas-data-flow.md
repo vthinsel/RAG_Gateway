@@ -197,14 +197,25 @@ to the configured collection. Its `$vectorSearch` stage uses:
 - `path`: `embedding`
 - `queryVector`: the newly generated query vector
 - `filter`: `tenant_id` equals the selected tenant
-- `limit`: the requested `top_k`
+- `limit`: the requested `top_k` when reranking is disabled; otherwise the larger
+  of `top_k` and `RETRIEVAL_RERANK_CANDIDATES`
 - `numCandidates`: the larger of `RETRIEVAL_NUM_CANDIDATES` (default: 100) and
-  `top_k`
+  the Vector Search `limit`
+
+When `RETRIEVAL_RERANK_ENABLED=true`, the pipeline next runs Atlas `$rerank`
+with `RETRIEVAL_RERANK_MODEL`, the original text query, the chunk `text` field,
+and up to `RETRIEVAL_RERANK_CANDIDATES` documents (maximum 1,000). A following
+`$addFields` stores the reranking score as `rerank_score`. Reranking is disabled
+by default and requires MongoDB 9.0+ plus Native Reranking enabled in Atlas
+project settings. The query and candidate text are sent to the Atlas reranking
+service.
 
 The results include the document ID, chunk index, text, metadata, and Atlas
-`vectorSearchScore`. The gateway then discards candidates below
-`RETRIEVAL_MIN_SCORE` (default: 0.72). As a result, the response may contain fewer
-than `top_k` chunks, including none. The response shape is `{"data": [...]}`.
+`vectorSearchScore` as `score`; when reranking is enabled they also include
+`rerank_score` and are ordered by reranker relevance. The gateway applies
+`RETRIEVAL_MIN_SCORE` (default: 0.72) to the original vector score and returns
+up to `top_k` matches. As a result, the response may contain fewer than `top_k`
+chunks, including none. The response shape is `{"data": [...]}`.
 
 ## How Atlas is used across the gateway
 
@@ -258,6 +269,9 @@ MongoDB Atlas remains the source of truth for ingested chunks and embeddings.
 | `RETRIEVAL_TOP_K` | `5` | Default vector result limit |
 | `RETRIEVAL_NUM_CANDIDATES` | `100` | Minimum Atlas vector candidates requested |
 | `RETRIEVAL_MIN_SCORE` | `0.72` | Minimum score accepted as evidence |
+| `RETRIEVAL_RERANK_ENABLED` | `false` | Enables Atlas Native Reranking after vector search |
+| `RETRIEVAL_RERANK_MODEL` | `rerank-2.5` | Voyage reranking model |
+| `RETRIEVAL_RERANK_CANDIDATES` | `100` | Maximum vector candidates passed to reranking (1–1,000) |
 | `DEFAULT_TENANT_ID` | `default` | Tenant used when a query omits its tenant |
 
 Keep the Atlas database user's privileges and network access limited to what the

@@ -22,7 +22,7 @@ from rag_gateway.main import (
     get_tenant_id,
     require_api_key,
 )
-from rag_gateway.rag import add_rag_system_message, extract_user_query
+from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder, _token_batches
 
@@ -39,6 +39,11 @@ def test_mongodb_api_model_endpoint_normalizes_to_v1(endpoint: str, expected: st
     settings = Settings(_env_file=None, mongodb_api_model_endpoint=endpoint)
 
     assert settings.mongodb_api_model_base_url == expected
+
+
+def test_rerank_candidate_limit_is_capped_at_atlas_maximum() -> None:
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, retrieval_rerank_candidates=1001)
 
 
 def test_chunk_text_respects_size_and_overlap() -> None:
@@ -195,6 +200,9 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
         atlas_vector_index="test-index",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
+        retrieval_rerank_enabled=False,
+        retrieval_rerank_candidates=100,
+        retrieval_rerank_model="rerank-2.5",
     )
     store.collection = Collection()
 
@@ -206,6 +214,93 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
     assert vector_search["limit"] == 3
     assert len(store.collection.pipeline) == 2
     assert [result["document_id"] for result in results] == ["high-score.md"]
+
+
+def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> None:
+    class Collection:
+        pipeline: list[dict] | None = None
+
+        def aggregate(self, pipeline: list[dict]) -> list[dict]:
+            self.pipeline = pipeline
+            return [
+                {"document_id": "reranked-first.md", "score": 0.8, "rerank_score": 0.95},
+                {"document_id": "below-vector-threshold.md", "score": 0.6, "rerank_score": 0.99},
+                {"document_id": "reranked-second.md", "score": 0.9, "rerank_score": 0.7},
+            ]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        atlas_vector_index="test-index",
+        retrieval_num_candidates=50,
+        retrieval_min_score=0.72,
+        retrieval_rerank_enabled=True,
+        retrieval_rerank_candidates=30,
+        retrieval_rerank_model="rerank-2.5-lite",
+    )
+    store.collection = Collection()
+
+    results = store.search("tenant-a", [0.1, 0.2], limit=2, query="search terms")
+
+    assert store.collection.pipeline is not None
+    vector_search = store.collection.pipeline[0]["$vectorSearch"]
+    assert vector_search["limit"] == 30
+    assert vector_search["numCandidates"] == 50
+    rerank = store.collection.pipeline[2]["$rerank"]
+    assert rerank == {
+        "model": "rerank-2.5-lite",
+        "query": {"text": "search terms"},
+        "path": "text",
+        "numDocsToRerank": 30,
+    }
+    assert [result["document_id"] for result in results] == [
+        "reranked-first.md",
+        "reranked-second.md",
+    ]
+    assert [result["score"] for result in results] == [0.8, 0.9]
+    assert [result["rerank_score"] for result in results] == [0.95, 0.7]
+
+
+def test_vector_search_requires_query_when_reranking_is_enabled() -> None:
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        retrieval_rerank_enabled=True,
+        retrieval_rerank_candidates=30,
+    )
+
+    with pytest.raises(ValueError, match="text query is required"):
+        store.search("tenant-a", [0.1, 0.2], limit=3)
+
+
+async def test_retrieve_context_passes_text_query_to_store() -> None:
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert texts == ["question text"]
+            assert input_type == "query"
+            return [[0.1, 0.2]]
+
+    class FakeStore:
+        def search(
+            self,
+            tenant_id: str,
+            query_vector: list[float],
+            limit: int,
+            query: str | None = None,
+        ) -> list[dict[str, Any]]:
+            assert tenant_id == "tenant-a"
+            assert query_vector == [0.1, 0.2]
+            assert limit == 5
+            assert query == "question text"
+            return []
+
+    results = await retrieve_context(
+        "question text",
+        "tenant-a",
+        Settings(_env_file=None),
+        FakeEmbedder(),
+        FakeStore(),
+    )
+
+    assert results == []
 
 
 @pytest.mark.parametrize(
@@ -344,6 +439,9 @@ def test_vector_search_logs_best_score_when_threshold_filters_all(
         atlas_vector_index="test-index",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
+        retrieval_rerank_enabled=False,
+        retrieval_rerank_candidates=100,
+        retrieval_rerank_model="rerank-2.5",
     )
     store.collection = Collection()
 
@@ -464,7 +562,13 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
     searches: list[tuple[str, int]] = []
 
     class FakeStore:
-        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+        def search(
+            self,
+            tenant_id: str,
+            vector: list[float],
+            limit: int,
+            query: str | None = None,
+        ) -> list[dict[str, Any]]:
             searches.append((tenant_id, limit))
             if vector == [1.0]:
                 return [
@@ -581,7 +685,13 @@ def test_retrieval_evaluation_accepts_shared_gateway_api_key(
     settings = Settings(_env_file=None, gateway_api_key="shared-evaluation-key")
 
     class FakeStore:
-        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+        def search(
+            self,
+            tenant_id: str,
+            vector: list[float],
+            limit: int,
+            query: str | None = None,
+        ) -> list[dict[str, Any]]:
             assert (tenant_id, vector, limit) == ("default", [0.1], 5)
             return [{"document_id": "guide.md", "chunk_index": 0, "score": 0.9, "metadata": {}}]
 
@@ -645,7 +755,13 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
     upstream_payloads: list[dict[str, Any]] = []
 
     class FakeStore:
-        def search(self, tenant_id: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
+        def search(
+            self,
+            tenant_id: str,
+            vector: list[float],
+            limit: int,
+            query: str | None = None,
+        ) -> list[dict[str, Any]]:
             searches.append((tenant_id, limit))
             return [
                 {

@@ -10,7 +10,7 @@ The project is built around a practical balance: keep answer generation on infra
 
 Read the [story behind the project](docs/project-story.md), the [beginner's guide in English](docs/beginner-guide-rag-gateway.md), or the [guide en français](docs/guide-debutant-rag-gateway.md) for the architecture, workflows, and user-facing tools.
 
-> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
+> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; if reranking is enabled, query text and candidate chunk text are also processed by MongoDB's Native Reranking service. Chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 
 The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns, uses tenant-filtered Atlas vector search with MongoDB Native Reranking enabled transparently by the MongoDB service, filters results below `RETRIEVAL_MIN_SCORE`, and adds evidence to the local model prompt. The Gateway does not issue a separate reranking request or expose reranker settings. Native Reranking is usage-billed, and MongoDB states its model inference runs on its infrastructure in a US region; review the service's current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, hybrid search, and document-level ACL filtering remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns and uses tenant-filtered Atlas vector search. Optional Atlas Native Reranking can reorder up to `RETRIEVAL_RERANK_CANDIDATES` vector results using the query and each chunk's text before the Gateway applies `RETRIEVAL_MIN_SCORE` to the original vector scores and returns up to `RETRIEVAL_TOP_K` chunks. Reranking is disabled by default; enabling it requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings. It is usage-billed and sends the query and candidate text to MongoDB's reranking service; review the service's current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, hybrid search, and document-level ACL filtering remain later phases.
 
 ## Build Plan
 
@@ -301,7 +301,11 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `150` | Character-based chunking; tune with evaluation |
 | `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one embedding request (also constrained by the estimated token budget) |
 | `RETRIEVAL_TOP_K` | `5` | Maximum retrieved chunks per request |
+| `RETRIEVAL_NUM_CANDIDATES` | `100` | Minimum number of vector-search candidates requested |
 | `RETRIEVAL_MIN_SCORE` | `0.72` | Minimum Atlas vector score accepted as evidence; calibrate against an evaluation set |
+| `RETRIEVAL_RERANK_ENABLED` | `false` | Enables the Atlas `$rerank` stage after vector search |
+| `RETRIEVAL_RERANK_MODEL` | `rerank-2.5` | Voyage reranking model used when reranking is enabled |
+| `RETRIEVAL_RERANK_CANDIDATES` | `100` | Maximum vector-search results sent to `$rerank` (1–1,000) |
 | `API_KEY_REGISTRY` | `{}` | JSON map of SHA-256 bearer-key hashes to allowed tenant IDs; overrides the shared key when non-empty |
 | `DOCUMENT_LOADER_ENABLED` | `false` | Enables the authenticated browser loader and its job APIs |
 | `DOCUMENT_LOADER_ROOTS` | `[]` | JSON array of directories the browser loader is allowed to scan |
@@ -326,15 +330,16 @@ ruff check src tests scripts
 - Chunking is character-based and does not preserve Markdown section structure. DOCX/PPTX extraction currently reads text and tables but not embedded images; the configured Ollama OCR model is used for PDF pages and standalone image files.
 - This starter stores chunk text and vectors together in Atlas. Atlas and its AI model endpoint are cloud services; do not ingest restricted content without approval.
 - Tenant-scoped API keys are optional and configured statically through `API_KEY_REGISTRY`. There is no user identity provider, dynamic tenant provisioning, or document-level ACL enforcement.
-- Retrieval uses tenant-filtered vector search with MongoDB Native Reranking enabled by the managed service. Hybrid full-text/vector retrieval, additional metadata/ACL filters, and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
+- Retrieval uses tenant-filtered vector search and optionally the Atlas `$rerank` stage. Reranking requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings; the `rerank-3` and `rerank-3-lite` models additionally require an M10+ cluster. Hybrid full-text/vector retrieval, additional metadata/ACL filters, and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
-- The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior; a labeled answer-evaluation harness and configurable Gateway-managed reranking remain future work. MongoDB Native Reranking is managed outside the Gateway and may incur usage-based charges.
+- The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior. MongoDB Native Reranking may incur usage-based charges.
 
 ## References
 
 - [MongoDB Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search/)
 - [MongoDB Vector Search query stage](https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/)
+- [MongoDB `$rerank` aggregation stage](https://www.mongodb.com/docs/vector-search/query/aggregation-stages/rerank/)
 - [Ollama OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md)
 - [Open WebUI OpenAI-compatible connections](https://docs.openwebui.com/getting-started/api-endpoints/)
 - [FastAPI deployment](https://fastapi.tiangolo.com/deployment/)

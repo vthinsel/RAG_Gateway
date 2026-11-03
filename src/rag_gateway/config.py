@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=5, ge=1, le=50)
     retrieval_num_candidates: int = Field(default=100, ge=1)
     retrieval_min_score: float = Field(default=0.72, ge=0.0, le=1.0)
+    retrieval_rerank_enabled: bool = False
+    retrieval_rerank_model: str = Field(default="rerank-2.5", min_length=1)
+    retrieval_rerank_candidates: int = Field(default=100, ge=1, le=1000)
     max_document_chars: int = Field(default=1_000_000, ge=1)
     max_query_chars: int = Field(default=8_000, ge=1)
     upstream_timeout_seconds: float = Field(default=180.0, gt=0)

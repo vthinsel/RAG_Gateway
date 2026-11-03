@@ -44,6 +44,9 @@ def test_save_settings_persists_values_and_preserves_unmanaged_lines(tmp_path: P
         mongodb_uri="mongodb+srv://user:password@cluster.example",
         document_loader_roots=[tmp_path],
         retrieval_min_score=0.63,
+        retrieval_rerank_enabled=True,
+        retrieval_rerank_model="rerank-2.5-lite",
+        retrieval_rerank_candidates=75,
     )
 
     saved_path = save_settings(settings, env_file)
@@ -57,6 +60,9 @@ def test_save_settings_persists_values_and_preserves_unmanaged_lines(tmp_path: P
     assert values["MONGODB_URI"] == "mongodb+srv://user:password@cluster.example"
     assert values["DOCUMENT_LOADER_ROOTS"] == f'["{tmp_path}"]'
     assert values["RETRIEVAL_MIN_SCORE"] == "0.63"
+    assert values["RETRIEVAL_RERANK_ENABLED"] == "true"
+    assert values["RETRIEVAL_RERANK_MODEL"] == "rerank-2.5-lite"
+    assert values["RETRIEVAL_RERANK_CANDIDATES"] == "75"
     assert env_file.stat().st_mode & 0o777 == 0o600
 
 
@@ -147,6 +153,9 @@ def test_environment_api_requires_admin_and_persists_updates(
                     "settings": {
                         "mongodb_database": "lab_rag",
                         "retrieval_min_score": 0.61,
+                        "retrieval_rerank_enabled": True,
+                        "retrieval_rerank_model": "rerank-2.5",
+                        "retrieval_rerank_candidates": 80,
                     },
                     "secrets": {"gateway_api_key": "new-admin-key"},
                 },
@@ -157,6 +166,9 @@ def test_environment_api_requires_admin_and_persists_updates(
         values = dotenv_values(tmp_path / ".env")
         assert values["MONGODB_DATABASE"] == "lab_rag"
         assert values["RETRIEVAL_MIN_SCORE"] == "0.61"
+        assert values["RETRIEVAL_RERANK_ENABLED"] == "true"
+        assert values["RETRIEVAL_RERANK_MODEL"] == "rerank-2.5"
+        assert values["RETRIEVAL_RERANK_CANDIDATES"] == "80"
         assert values["GATEWAY_API_KEY"] == "new-admin-key"
         restarted_settings = Settings(_env_file=tmp_path / ".env")
         assert restarted_settings.mongodb_database == "lab_rag"

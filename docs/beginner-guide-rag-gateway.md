@@ -37,9 +37,9 @@ Chunking is character-based, not token-based. It does not yet preserve Markdown 
 
 ### Reranking: reorder search results
 
-Vector search selects candidate passages. A *reranker* examines the question and candidates together, then reorders them by relevance. In this deployment, MongoDB Native Reranking is enabled and handled transparently by the MongoDB service after the Gateway submits its tenant-filtered vector-search aggregation. The Gateway does not make a separate reranking API call or expose reranker configuration.
+Vector search selects candidate passages. A *reranker* examines the question and candidates together, then reorders them by relevance. Atlas Native Reranking is an optional Gateway setting, disabled by default. Set `RETRIEVAL_RERANK_ENABLED=true` to add MongoDB's `$rerank` stage after tenant-filtered vector search. Choose the model with `RETRIEVAL_RERANK_MODEL` (default `rerank-2.5`) and the candidate pool with `RETRIEVAL_RERANK_CANDIDATES` (default `100`, maximum `1,000`). The reranked order is used for returned results, while `RETRIEVAL_MIN_SCORE` continues to filter on the original vector-search score.
 
-Native Reranking can improve the order of retrieved candidates, but it adds inference latency and usage-based cost. MongoDB states that its model inference platform runs on MongoDB infrastructure in a US region; check current service terms and data policies before sending sensitive content. The Gateway still applies `RETRIEVAL_MIN_SCORE` to the scores returned through its search flow. Hybrid text-plus-vector search is not implemented.
+Native Reranking requires MongoDB 9.0 or later and must be enabled in Atlas project settings. It can improve the order of retrieved candidates, but adds inference latency and usage-based cost. The query and candidate text are sent to MongoDB's reranking service; check current service terms and data policies before enabling it for sensitive content. Hybrid text-plus-vector search is not implemented.
 
 ## 2. At a Glance
 
@@ -307,7 +307,8 @@ Settings are stored in `.env`; `.env.example` lists the names and starting value
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local generation service address and model. Compose overrides `OLLAMA_BASE_URL` in the container to reach the host. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Character-based document chunking. |
 | `EMBEDDING_BATCH_SIZE` | Maximum texts per MongoDB AI model request, in addition to the estimated token budget. |
-| `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Maximum result count and minimum accepted score. |
+| `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Maximum result count and minimum original vector score. |
+| `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_RERANK_MODEL`, `RETRIEVAL_RERANK_CANDIDATES` | Optional Atlas Native Reranking and its model and candidate-pool size. Requires MongoDB 9.0+ and project-level enablement. |
 
 `API_KEY_REGISTRY` is a JSON object whose keys are lowercase SHA-256 hex digests of raw bearer secrets and whose values are arrays of tenant ID strings. Example:
 
@@ -320,11 +321,11 @@ Settings are stored in `.env`; `.env.example` lists the names and starting value
 
 Compute each property name as `hashlib.sha256(raw_secret.encode()).hexdigest()`. Store only the digest in the registry and give each client its raw secret. With a non-empty registry, standard API authentication uses registered keys only: each can access only its listed tenants, and requested tenant IDs must match. Browser management tools additionally accept `GATEWAY_API_KEY` as a full-access administrator key; registry keys remain scoped. With an empty registry, API requests use `GATEWAY_API_KEY`. The environment editor requires `GATEWAY_API_KEY`; registry-scoped client keys cannot administer settings.
 
-Embeddings and storage are cloud services in this architecture: source text and questions are sent to the configured MongoDB AI model endpoint, while chunks and their vectors are stored in Atlas. Check your organization's data classification and policies before using real documents.
+Embeddings and storage are cloud services in this architecture: source text and questions are sent to the configured MongoDB AI model endpoint, while chunks and their vectors are stored in Atlas. When reranking is enabled, candidate chunk text and the query are also processed by MongoDB's reranking service. Check your organization's data classification and policies before using real documents.
 
 At startup, the gateway logs the Ollama models it discovers, pings Atlas without exposing URI credentials, checks whether the configured Atlas Vector Search index exists and is queryable, and lists the distinct tenant IDs found in the collection. If `MONGODB_API_KEY` is configured, it also sends a small model-check embedding request to the MongoDB AI API endpoint; this request may count toward API usage. Otherwise that check is logged as skipped. Document ingestion and query embedding use the same endpoint and key.
 
-The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It has a retrieval evaluation workbench for manually labeled question/document cases, but no answer-quality evaluation. MongoDB Native Reranking is enabled and managed outside the Gateway; the application has no Gateway-managed reranker, hybrid search, Prometheus metrics, or document-level ACL filtering. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
+The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It has a retrieval evaluation workbench for manually labeled question/document cases, but no answer-quality evaluation. Atlas Native Reranking is configurable through the Gateway; hybrid search, Prometheus metrics, and document-level ACL filtering are not implemented. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
 
 ## 8. Quick Start
 

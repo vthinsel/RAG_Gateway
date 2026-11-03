@@ -157,15 +157,29 @@ class AtlasStore:
             {"tenant_id": tenant_id, "document_id": document_id}
         ).deleted_count
 
-    def search(self, tenant_id: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
+    def search(
+        self,
+        tenant_id: str,
+        query_vector: list[float],
+        limit: int,
+        query: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rerank_enabled = self.settings.retrieval_rerank_enabled
+        rerank_limit = max(self.settings.retrieval_rerank_candidates, limit)
+        if rerank_enabled and query is None:
+            raise ValueError("A text query is required when retrieval reranking is enabled")
+
         pipeline = [
             {
                 "$vectorSearch": {
                     "index": self.settings.atlas_vector_index,
                     "path": "embedding",
                     "queryVector": query_vector,
-                    "numCandidates": max(self.settings.retrieval_num_candidates, limit),
-                    "limit": limit,
+                    "numCandidates": max(
+                        self.settings.retrieval_num_candidates,
+                        rerank_limit if rerank_enabled else limit,
+                    ),
+                    "limit": rerank_limit if rerank_enabled else limit,
                     "filter": {"tenant_id": {"$eq": tenant_id}},
                 }
             },
@@ -180,6 +194,20 @@ class AtlasStore:
                 }
             },
         ]
+        if rerank_enabled:
+            pipeline.extend(
+                [
+                    {
+                        "$rerank": {
+                            "model": self.settings.retrieval_rerank_model,
+                            "query": {"text": query},
+                            "path": "text",
+                            "numDocsToRerank": rerank_limit,
+                        }
+                    },
+                    {"$addFields": {"rerank_score": {"$meta": "score"}}},
+                ]
+            )
         candidates = list(self.collection.aggregate(pipeline))
         matches = [
             candidate
@@ -204,4 +232,4 @@ class AtlasStore:
                     tenant_id,
                     self.settings.atlas_vector_index,
                 )
-        return matches
+        return matches[:limit]
