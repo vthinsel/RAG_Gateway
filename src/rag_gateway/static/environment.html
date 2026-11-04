@@ -63,6 +63,7 @@
         ["mongodb_database", "Database", "text"],
         ["mongodb_collection", "Collection", "text"],
         ["atlas_vector_index", "Vector Search index", "text"],
+        ["atlas_search_index", "Atlas Search index", "text", "Atlas Search index used for hybrid lexical retrieval."],
         ["voyage_embedding_model", "Embedding model", "text"],
         ["embedding_dimensions", "Embedding dimensions", "number"],
         ["embedding_batch_size", "Embedding batch size", "number"]
@@ -82,6 +83,8 @@
         ["retrieval_rerank_enabled", "Enable Atlas Native Reranking", "boolean", "Requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings."],
         ["retrieval_rerank_model", "Reranker model", "text", "Voyage reranker model, for example rerank-2.5."],
         ["retrieval_rerank_candidates", "Maximum rerank candidates", "number", "Maximum number of vector-search results to pass to the reranker (1-1000)."],
+        ["retrieval_hybrid_enabled", "Enable hybrid vector + text search", "boolean", "Combines tenant-filtered vector and Atlas Search results using reciprocal-rank fusion; requires the configured Atlas Search index."],
+        ["retrieval_hybrid_candidates", "Maximum hybrid candidates", "number", "Maximum results from each search branch before fusion (1-1000)."],
         ["max_document_chars", "Maximum document characters", "number"],
         ["max_query_chars", "Maximum query characters", "number"],
         ["upstream_timeout_seconds", "Upstream timeout (seconds)", "number"]

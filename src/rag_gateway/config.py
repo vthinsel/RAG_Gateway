@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     mongodb_database: str = "rag_gateway"
     mongodb_collection: str = "chunks"
     atlas_vector_index: str = "rag_chunks_vector"
+    atlas_search_index: str = "rag_chunks_text"
     voyage_embedding_model: str = "voyage-4"
     embedding_dimensions: int = Field(default=1024, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1, le=128)
@@ -47,6 +48,8 @@ class Settings(BaseSettings):
     retrieval_rerank_enabled: bool = False
     retrieval_rerank_model: str = Field(default="rerank-2.5", min_length=1)
     retrieval_rerank_candidates: int = Field(default=100, ge=1, le=1000)
+    retrieval_hybrid_enabled: bool = False
+    retrieval_hybrid_candidates: int = Field(default=100, ge=1, le=1000)
     max_document_chars: int = Field(default=1_000_000, ge=1)
     max_query_chars: int = Field(default=8_000, ge=1)
     upstream_timeout_seconds: float = Field(default=180.0, gt=0)

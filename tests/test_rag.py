@@ -216,6 +216,67 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
     assert [result["document_id"] for result in results] == ["high-score.md"]
 
 
+def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
+    class Collection:
+        def __init__(self) -> None:
+            self.pipelines: list[list[dict[str, Any]]] = []
+
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            self.pipelines.append(pipeline)
+            if "$vectorSearch" in pipeline[0]:
+                return [
+                    {"_id": "alpha", "document_id": "alpha.md", "chunk_index": 0, "score": 0.8},
+                    {"_id": "bravo", "document_id": "bravo.md", "chunk_index": 0, "score": 0.6},
+                ]
+            return [
+                {"_id": "bravo", "document_id": "bravo.md", "chunk_index": 0, "score": 5.0},
+                {"_id": "charlie", "document_id": "charlie.md", "chunk_index": 0, "score": 4.0},
+            ]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        atlas_vector_index="vector-index",
+        atlas_search_index="text-index",
+        retrieval_num_candidates=50,
+        retrieval_min_score=0.72,
+        retrieval_rerank_enabled=True,
+        retrieval_rerank_candidates=30,
+        retrieval_rerank_model="rerank-2.5-lite",
+        retrieval_hybrid_enabled=False,
+        retrieval_hybrid_candidates=40,
+    )
+    store.collection = Collection()
+
+    results = store.search(
+        "tenant-a",
+        [0.1, 0.2],
+        limit=3,
+        query="search terms",
+        rerank_enabled=True,
+        hybrid_enabled=True,
+    )
+
+    vector_pipeline, lexical_pipeline = store.collection.pipelines
+    vector_search = vector_pipeline[0]["$vectorSearch"]
+    lexical_search = lexical_pipeline[0]["$search"]
+    assert vector_search["filter"] == {"tenant_id": {"$eq": "tenant-a"}}
+    assert vector_search["limit"] == 30
+    assert vector_pipeline[2]["$rerank"]["numDocsToRerank"] == 30
+    assert lexical_search["index"] == "text-index"
+    assert lexical_search["compound"]["filter"] == [
+        {"equals": {"path": "tenant_id", "value": "tenant-a"}}
+    ]
+    assert lexical_pipeline[1] == {"$limit": 40}
+    assert [result["document_id"] for result in results] == [
+        "bravo.md",
+        "alpha.md",
+        "charlie.md",
+    ]
+    assert results[0]["vector_score"] == 0.6
+    assert results[0]["lexical_score"] == 5.0
+    assert results[0]["score"] == pytest.approx(1 / 62 + 1 / 61)
+
+
 def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> None:
     class Collection:
         pipeline: list[dict] | None = None
@@ -368,6 +429,31 @@ def test_vector_index_status(index_document: dict[str, Any] | None, expected: tu
     store.collection = Collection()
 
     assert store.vector_index_status() == expected
+
+
+@pytest.mark.parametrize(
+    ("index_document", "expected"),
+    [
+        ({"queryable": True}, (True, True)),
+        ({"status": "READY"}, (True, True)),
+        ({"status": "BUILDING"}, (True, False)),
+        (None, (False, False)),
+    ],
+)
+def test_search_index_status(
+    index_document: dict[str, Any] | None,
+    expected: tuple[bool, bool],
+) -> None:
+    class Collection:
+        def list_search_indexes(self, *, name: str) -> list[dict[str, Any]]:
+            assert name == "text-index"
+            return [index_document] if index_document else []
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(atlas_search_index="text-index")
+    store.collection = Collection()
+
+    assert store.search_index_status() == expected
 
 
 def test_list_tenant_ids_returns_sorted_string_ids() -> None:
@@ -803,7 +889,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         gateway_api_key="playground-admin-key",
         api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
     )
-    searches: list[tuple[str, int, bool | None]] = []
+    searches: list[tuple[str, int, bool | None, bool | None]] = []
     upstream_payloads: list[dict[str, Any]] = []
 
     class FakeStore:
@@ -814,8 +900,9 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
             limit: int,
             query: str | None = None,
             rerank_enabled: bool | None = None,
+            hybrid_enabled: bool | None = None,
         ) -> list[dict[str, Any]]:
-            searches.append((tenant_id, limit, rerank_enabled))
+            searches.append((tenant_id, limit, rerank_enabled, hybrid_enabled))
             return [
                 {
                     "document_id": "guide.md",
@@ -881,6 +968,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                         "top_k": 2,
                         "stream": False,
                         "rerank_enabled": False,
+                        "hybrid_enabled": True,
                     },
                 )
                 tenant_scope_response = client.post(
@@ -909,12 +997,14 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         assert "RAG playground" in page.text
         assert 'id="rerank-enabled" type="checkbox"' in page.text
         assert "rerank_enabled: rerankEnabled" in page.text
+        assert 'id="hybrid-enabled" type="checkbox"' in page.text
+        assert "hybrid_enabled: hybridEnabled" in page.text
         assert response.status_code == 200
         assert tenant_scope_response.status_code == 403
         assert invalid_top_k_response.status_code == 422
         assert response.json()["choices"][0]["message"]["content"] == "It opens at 08:00. [S1]"
         assert response.json()["sources"][0]["document_id"] == "guide.md"
-        assert searches == [("tenant-b", 2, False)]
+        assert searches == [("tenant-b", 2, False, True)]
         assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]
     finally:
         app.dependency_overrides.pop(get_settings, None)

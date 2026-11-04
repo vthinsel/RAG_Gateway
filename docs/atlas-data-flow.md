@@ -12,14 +12,16 @@ flowchart LR
     Gateway -->|document embeddings| AI[MongoDB AI Models API]
     AI -->|vectors| Gateway
     Gateway -->|text, metadata, vectors| Collection[Atlas chunks collection]
-    Question[User question] -->|query embedding| AI
-    Gateway -->|$vectorSearch, tenant filter| Collection
-    Collection -->|ranked chunks| Gateway
+    Question[User question] --> Gateway
+    Gateway -->|query embedding| AI[MongoDB AI Models API]
+    Gateway -->|$vectorSearch and optional $search, tenant filters| Collection
+    Collection -->|ranked or fused chunks| Gateway
     Gateway -->|evidence-augmented prompt| Ollama[Ollama chat model]
 ```
 
-Atlas is the durable vector store. The configured MongoDB AI Models API generates
-embeddings; the gateway does not calculate vectors locally. The chat model is served
+Atlas is the durable chunk store and runs both semantic and optional lexical search.
+The configured MongoDB AI Models API generates embeddings; the gateway does not
+calculate vectors locally. The chat model is served
 by Ollama, not by Atlas. Both source text and user queries are sent to the configured
 embedding endpoint, while stored chunk text, metadata, and vectors reside in Atlas.
 Review your data classification, endpoint terms, Atlas region, retention, and network
@@ -167,6 +169,17 @@ The gateway checks the configured index name and whether it is queryable during
 startup/status checks. It does not create, update, or migrate the Vector Search
 index. Create it in Atlas and wait until it is ready before relying on retrieval.
 
+## Atlas Search index for hybrid retrieval
+
+Hybrid retrieval also requires an Atlas Search index on the same collection. The
+default name is `rag_chunks_text`, configured with `ATLAS_SEARCH_INDEX`. Create it
+from [`infra/atlas-search-index.json`](../infra/atlas-search-index.json) and wait
+until Atlas reports it queryable. This definition indexes `text` with
+`lucene.standard` and maps `tenant_id` as a token so Atlas can filter to one tenant
+inside the lexical search. The application does not create or update this managed
+index. `GET /v1/status` reports the index state when hybrid mode is enabled, and
+`/readyz` remains unavailable until it is ready.
+
 ## Retrieval request and search behavior
 
 To inspect retrieval without generating a chat response:
@@ -181,7 +194,8 @@ Content-Type: application/json
 ```json
 {
   "query": "How many days of leave are available?",
-  "top_k": 5
+  "top_k": 5,
+  "hybrid_enabled": true
 }
 ```
 
@@ -197,12 +211,14 @@ to the configured collection. Its `$vectorSearch` stage uses:
 - `path`: `embedding`
 - `queryVector`: the newly generated query vector
 - `filter`: `tenant_id` equals the selected tenant
-- `limit`: the requested `top_k` when reranking is disabled; otherwise the larger
-  of `top_k` and `RETRIEVAL_RERANK_CANDIDATES`
+- `limit`: the requested `top_k` for vector-only retrieval; the larger of
+  `top_k` and the configured candidate count when reranking or hybrid retrieval
+  is enabled. If both are enabled, the vector branch uses the smaller of the
+  rerank and hybrid candidate counts.
 - `numCandidates`: the larger of `RETRIEVAL_NUM_CANDIDATES` (default: 100) and
   the Vector Search `limit`
 
-When `RETRIEVAL_RERANK_ENABLED=true`, the pipeline next runs Atlas `$rerank`
+When `RETRIEVAL_RERANK_ENABLED=true`, the vector pipeline next runs Atlas `$rerank`
 with `RETRIEVAL_RERANK_MODEL`, the original text query, the chunk `text` field,
 and up to `RETRIEVAL_RERANK_CANDIDATES` documents (maximum 1,000). A following
 `$addFields` stores the reranking score as `rerank_score`. Reranking is disabled
@@ -210,12 +226,22 @@ by default and requires MongoDB 9.0+ plus Native Reranking enabled in Atlas
 project settings. The query and candidate text are sent to the Atlas reranking
 service.
 
-The results include the document ID, chunk index, text, metadata, and Atlas
-`vectorSearchScore` as `score`; when reranking is enabled they also include
-`rerank_score` and are ordered by reranker relevance. The gateway applies
-`RETRIEVAL_MIN_SCORE` (default: 0.72) to the original vector score and returns
-up to `top_k` matches. As a result, the response may contain fewer than `top_k`
-chunks, including none. The response shape is `{"data": [...]}`.
+When `hybrid_enabled` is true in the request, or `RETRIEVAL_HYBRID_ENABLED=true`
+and the request omits the option, the gateway also runs an Atlas `$search` query
+against `text`, filtered by the same `tenant_id`. It retrieves up to
+`RETRIEVAL_HYBRID_CANDIDATES` results from each branch, then combines their
+ranks using reciprocal-rank fusion (RRF). If reranking is also enabled, its candidate
+limit caps the vector branch. This application-side merge does not require
+MongoDB's `$rankFusion` server version. The query text is sent to Atlas Search;
+the lexical branch does not generate another embedding.
+
+Without hybrid mode, results include the Atlas `vectorSearchScore` as `score`;
+when reranking is enabled they also include `rerank_score`, and `score` remains
+the original vector score used by `RETRIEVAL_MIN_SCORE`. With hybrid mode, `score`
+is the RRF score and branch scores are exposed as `vector_score` and
+`lexical_score` when available. The vector-only minimum-score threshold is not
+applied to the fused score, which has a different scale. Both modes return up to
+`top_k` matches in `{"data": [...]}`.
 
 ## How Atlas is used across the gateway
 
@@ -259,6 +285,7 @@ MongoDB Atlas remains the source of truth for ingested chunks and embeddings.
 | `MONGODB_DATABASE` | `rag_gateway` | Database containing the collection |
 | `MONGODB_COLLECTION` | `chunks` | Collection containing one record per chunk |
 | `ATLAS_VECTOR_INDEX` | `rag_chunks_vector` | Atlas Vector Search index name |
+| `ATLAS_SEARCH_INDEX` | `rag_chunks_text` | Atlas Search index name used for hybrid retrieval |
 | `MONGODB_API_MODEL_ENDPOINT` | `ai.mongodb.com` | Embedding API endpoint host |
 | `MONGODB_API_KEY` | empty | Bearer credential for embedding requests |
 | `VOYAGE_EMBEDDING_MODEL` | `voyage-3.5` | Model used for document and query embeddings |
@@ -272,6 +299,8 @@ MongoDB Atlas remains the source of truth for ingested chunks and embeddings.
 | `RETRIEVAL_RERANK_ENABLED` | `false` | Enables Atlas Native Reranking after vector search |
 | `RETRIEVAL_RERANK_MODEL` | `rerank-2.5` | Voyage reranking model |
 | `RETRIEVAL_RERANK_CANDIDATES` | `100` | Maximum vector candidates passed to reranking (1–1,000) |
+| `RETRIEVAL_HYBRID_ENABLED` | `false` | Enables tenant-filtered vector + lexical retrieval with reciprocal-rank fusion |
+| `RETRIEVAL_HYBRID_CANDIDATES` | `100` | Maximum candidates from each hybrid search branch (1–1,000) |
 | `DEFAULT_TENANT_ID` | `default` | Tenant used when a query omits its tenant |
 
 Keep the Atlas database user's privileges and network access limited to what the

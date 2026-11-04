@@ -94,6 +94,10 @@
         <input id="rerank-enabled" type="checkbox">
         Enable reranking for this request
       </label>
+      <label class="checkbox-field" for="hybrid-enabled">
+        <input id="hybrid-enabled" type="checkbox">
+        Enable hybrid vector + text search for this request
+      </label>
       <div class="field">
         <label for="query">Question</label>
         <textarea id="query" maxlength="8000" placeholder="Ask a question about your ingested documents" required></textarea>
@@ -101,7 +105,7 @@
       <div class="buttons">
         <button id="submit" type="button">Run</button>
       </div>
-      <p class="note">Chat mode calls the configured local model and includes source citations. Retrieval-only mode shows the matching chunks without generating an answer. Reranking is disabled unless selected here, regardless of the server default. Query text is sent to the configured embedding service.</p>
+      <p class="note">Chat mode calls the configured local model and includes source citations. Retrieval-only mode shows the matching chunks without generating an answer. Reranking and hybrid search are disabled unless selected here, regardless of the server defaults. Query text is sent to the configured embedding service.</p>
       <p id="message" role="status" aria-live="polite"></p>
     </section>
     <section id="answer-panel" aria-labelledby="answer-title" hidden>
@@ -167,6 +171,7 @@
         const tenant = document.querySelector("#tenant").value.trim();
         const topK = Number(document.querySelector("#top-k").value);
         const rerankEnabled = document.querySelector("#rerank-enabled").checked;
+        const hybridEnabled = document.querySelector("#hybrid-enabled").checked;
         if (!token) throw new Error("Enter a gateway bearer token.");
         if (!query) throw new Error("Enter a question.");
         if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
@@ -181,13 +186,14 @@
             "Content-Type": "application/json"
           },
           body: JSON.stringify(mode === "retrieve"
-            ? { query, top_k: topK, rerank_enabled: rerankEnabled }
+            ? { query, top_k: topK, rerank_enabled: rerankEnabled, hybrid_enabled: hybridEnabled }
             : {
                 model: "rag-local",
                 messages: [{ role: "user", content: query }],
                 stream: false,
                 top_k: topK,
-                rerank_enabled: rerankEnabled
+                rerank_enabled: rerankEnabled,
+                hybrid_enabled: hybridEnabled
               })
         });
         const data = await response.json().catch(() => ({}));

@@ -1,0 +1,14 @@
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "text": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "tenant_id": {
+        "type": "token"
+      }
+    }
+  }
+}

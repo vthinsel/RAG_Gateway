@@ -23,14 +23,20 @@ async def retrieve_context(
     store: AtlasStore,
     top_k: int | None = None,
     rerank_enabled: bool | None = None,
+    hybrid_enabled: bool | None = None,
 ) -> list[dict[str, Any]]:
     query_vector = (await embedder.embed([query], input_type="query"))[0]
+    search_options: dict[str, bool] = {}
+    if rerank_enabled is not None:
+        search_options["rerank_enabled"] = rerank_enabled
+    if hybrid_enabled is not None:
+        search_options["hybrid_enabled"] = hybrid_enabled
     return store.search(
         tenant_id,
         query_vector,
         top_k if top_k is not None else settings.retrieval_top_k,
         query=query,
-        rerank_enabled=rerank_enabled,
+        **search_options,
     )
 
 

@@ -138,7 +138,9 @@
       overall.textContent = data.status.replaceAll("_", " ");
       overall.className = data.status;
       components.replaceChildren();
-      for (const [key, label] of Object.entries(componentLabels)) {
+      const labels = { ...componentLabels };
+      if (data.search_index) labels.search_index = "Atlas Search index";
+      for (const [key, label] of Object.entries(labels)) {
         const info = data[key];
         const card = document.createElement("article");
         card.className = "component";
@@ -154,6 +156,8 @@
             ? ""
             : key === "vector_index"
               ? `Index: ${info.name}`
+              : key === "search_index"
+                ? `Index: ${info.name}`
               : key === "ollama"
                 ? `${info.endpoint} · ${info.model}${info.models_discovered === undefined ? "" : ` · ${info.models_discovered} model(s) discovered`}`
                 : key === "mongodb_ai_api"

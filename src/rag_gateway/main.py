@@ -449,6 +449,14 @@ def _requested_rerank_enabled(value: Any) -> bool | None:
     return value
 
 
+def _requested_hybrid_enabled(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=422, detail="hybrid_enabled must be a boolean")
+    return value
+
+
 @app.get("/healthz")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -509,6 +517,11 @@ async def gateway_status(
             else "not_configured"
         },
     }
+    if settings.retrieval_hybrid_enabled:
+        status["search_index"] = {
+            "status": "unknown",
+            "name": settings.atlas_search_index,
+        }
 
     store = getattr(request.app.state, "store", None)
     if store is not None:
@@ -520,9 +533,19 @@ async def gateway_status(
                 "ready" if index_exists and index_queryable else
                 "building" if index_exists else "missing"
             )
+            if settings.retrieval_hybrid_enabled:
+                search_exists, search_queryable = await run_in_threadpool(
+                    store.search_index_status
+                )
+                status["search_index"]["status"] = (
+                    "ready" if search_exists and search_queryable else
+                    "building" if search_exists else "missing"
+                )
         except PyMongoError as error:
             status["atlas"] = {"status": "error", "error": type(error).__name__}
             status["vector_index"]["status"] = "unavailable"
+            if settings.retrieval_hybrid_enabled:
+                status["search_index"]["status"] = "unavailable"
             logger.warning("Gateway status Atlas check failed (%s)", type(error).__name__)
     else:
         status["atlas"] = {"status": request.app.state.atlas_status}
@@ -553,11 +576,15 @@ async def gateway_status(
         status["mongodb_ai_api"]["status"] == "configured",
         bool(settings.gateway_api_key or settings.api_key_registry),
     )
+    if settings.retrieval_hybrid_enabled:
+        components += (status["search_index"]["status"] == "ready",)
     if not all(components):
         status["status"] = (
             "not_ready"
             if status["atlas"]["status"] in {"not_configured", "connecting", "unavailable", "error"}
             or status["vector_index"]["status"] in {"missing", "unavailable"}
+            or settings.retrieval_hybrid_enabled
+            and status["search_index"]["status"] in {"missing", "unavailable"}
             else "degraded"
         )
     return status
@@ -581,6 +608,10 @@ async def readiness(request: Request) -> JSONResponse:
         return JSONResponse(status_code=503, content={"status": "not_ready"})
     try:
         await run_in_threadpool(store.ping)
+        if settings.retrieval_hybrid_enabled:
+            index_exists, index_queryable = await run_in_threadpool(store.search_index_status)
+            if not index_exists or not index_queryable:
+                return JSONResponse(status_code=503, content={"status": "not_ready"})
     except PyMongoError as error:
         logger.warning("Atlas readiness ping failed (%s): %s", type(error).__name__, error)
         logger.debug("Atlas readiness ping details", exc_info=error)
@@ -1508,6 +1539,7 @@ async def retrieve(
     tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
     top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
     rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
+    hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
     try:
         sources = await retrieve_context(
             query[: settings.max_query_chars],
@@ -1517,6 +1549,7 @@ async def retrieve(
             store,
             top_k,
             rerank_enabled,
+            hybrid_enabled,
         )
     except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
@@ -1548,7 +1581,19 @@ async def evaluate_retrieval(
         started_at = asyncio.get_running_loop().time()
         try:
             vector = (await embedder.embed([query], input_type="query"))[0]
-            sources = await run_in_threadpool(store.search, tenant_id, vector, body.top_k)
+            search_options = (
+                {"hybrid_enabled": body.hybrid_enabled}
+                if body.hybrid_enabled is not None
+                else {}
+            )
+            sources = await run_in_threadpool(
+                store.search,
+                tenant_id,
+                vector,
+                body.top_k,
+                query=query,
+                **search_options,
+            )
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(
                 status_code=502,
@@ -1816,9 +1861,17 @@ async def chat_completions(
         tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
         top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
         rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
+        hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
         try:
             sources = await retrieve_context(
-                query, tenant_id, settings, embedder, store, top_k, rerank_enabled
+                query,
+                tenant_id,
+                settings,
+                embedder,
+                store,
+                top_k,
+                rerank_enabled,
+                hybrid_enabled,
             )
         except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
             raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error

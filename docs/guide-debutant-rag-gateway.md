@@ -25,7 +25,7 @@ Un embedding est une liste de nombres calculée à partir d'un texte. Des textes
 
 Par défaut, cette application demande le modèle d'embedding `voyage-3.5` via l'API AI Models de MongoDB pour produire des vecteurs de 1024 dimensions. Le même modèle sert pour les documents et les questions, avec des modes distincts (`document` et `query`). Le nombre de dimensions du modèle, la configuration `EMBEDDING_DIMENSIONS` et l'index Atlas doivent correspondre.
 
-La recherche est une proximité vectorielle avec similarité cosinus. Atlas renvoie un score ; l'application écarte les résultats en dessous de `RETRIEVAL_MIN_SCORE`, qui vaut `0.72` par défaut. Ce seuil est un point de départ à mesurer sur vos propres questions, pas une garantie universelle de pertinence.
+La recherche vectorielle utilise une proximité avec similarité cosinus. Atlas renvoie un score ; en mode vectoriel seul, l'application écarte les résultats en dessous de `RETRIEVAL_MIN_SCORE`, qui vaut `0.72` par défaut. Ce seuil est un point de départ à mesurer sur vos propres questions, pas une garantie universelle de pertinence.
 
 ### Chunking : découper un document en passages
 
@@ -39,7 +39,11 @@ Le découpage est basé sur les caractères, pas sur les tokens du modèle. Il n
 
 La recherche vectorielle sélectionne des passages candidats. Un *reranker* examine ensemble la question et les passages candidats, puis les réordonne selon leur pertinence. Native Reranking d'Atlas est une option de la gateway, désactivée par défaut. Définissez `RETRIEVAL_RERANK_ENABLED=true` pour ajouter l'étape MongoDB `$rerank` après la recherche vectorielle filtrée par tenant. Choisissez le modèle avec `RETRIEVAL_RERANK_MODEL` (par défaut `rerank-2.5`) et la taille du pool de candidats avec `RETRIEVAL_RERANK_CANDIDATES` (par défaut `100`, maximum `1 000`). L'ordre reranké est utilisé pour les résultats, tandis que `RETRIEVAL_MIN_SCORE` continue de filtrer sur le score vectoriel d'origine.
 
-Native Reranking nécessite MongoDB 9.0 ou une version ultérieure et doit être activé dans les paramètres du projet Atlas. Il peut améliorer l'ordre des résultats, mais ajoute de la latence d'inférence et des coûts liés à l'utilisation. La question et le texte des candidats sont envoyés au service de reranking MongoDB ; vérifiez les conditions de service et les règles de données applicables avant de l'activer pour des contenus sensibles. La recherche hybride texte + vecteurs n'est pas implémentée.
+Native Reranking nécessite MongoDB 9.0 ou une version ultérieure et doit être activé dans les paramètres du projet Atlas. Il peut améliorer l'ordre des résultats, mais ajoute de la latence d'inférence et des coûts liés à l'utilisation. La question et le texte des candidats sont envoyés au service de reranking MongoDB ; vérifiez les conditions de service et les règles de données applicables avant de l'activer pour des contenus sensibles.
+
+### Recherche hybride : combiner sens et mots-clés
+
+La recherche hybride exécute une recherche vectorielle filtrée par tenant et une recherche textuelle Atlas Search avec le même filtre, puis fusionne leurs classements avec la méthode reciprocal-rank fusion (RRF). Elle peut retrouver à la fois des passages sémantiquement proches et ceux qui contiennent des termes importants. Elle est désactivée par défaut : définissez `RETRIEVAL_HYBRID_ENABLED=true` ou envoyez `hybrid_enabled: true` pour une requête. Créez un index Atlas Search distinct nommé `ATLAS_SEARCH_INDEX` (par défaut `rag_chunks_text`) avec [`infra/atlas-search-index.json`](../infra/atlas-search-index.json) ; il indexe le texte des chunks et le `tenant_id` comme token. En mode hybride, `score` est le score fusionné et non le score vectoriel : `RETRIEVAL_MIN_SCORE` ne s'applique qu'au mode vectoriel seul. La réponse inclut les scores de chaque branche lorsqu'ils existent.
 
 ## 2. Vue d'ensemble
 

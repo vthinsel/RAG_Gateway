@@ -10,15 +10,15 @@ The project began with a practical question: how can a local assistant use an or
 
 ## Give the model evidence at question time
 
-Atlas RAG Gateway puts retrieval between the client and the model. Documents are split into passages, embedded, and stored with their vectors and metadata. When a user asks a question, the gateway embeds that question, searches for nearby passages within the selected tenant, and adds the strongest qualifying passages to the conversation. Ollama then generates an answer using that evidence, with source labels such as `[S1]` and `[S2]`.
+Atlas RAG Gateway puts retrieval between the client and the model. Documents are split into passages, embedded, and stored with their vectors and metadata. When a user asks a question, the gateway embeds that question, searches for nearby passages within the selected tenant, and can fuse those results with tenant-filtered Atlas Search text matches. Ollama then generates an answer using that evidence, with source labels such as `[S1]` and `[S2]`.
 
-This is Retrieval-Augmented Generation: rather than expecting the model to remember private or changing material, retrieve relevant context when it is needed. The same gateway can serve Open WebUI, Hermes, and other compatible clients, so the retrieval behavior is shared instead of re-created in each interface or agent.
+This is Retrieval-Augmented Generation: rather than expecting the model to remember private or changing material, retrieve relevant context when it is needed. Optional hybrid retrieval combines semantic and lexical rankings with reciprocal-rank fusion. The same gateway can serve Open WebUI, Hermes, and other compatible clients, so the retrieval behavior is shared instead of re-created in each interface or agent.
 
 ```mermaid
 flowchart LR
 	Client[Open WebUI or Hermes] --> Gateway[Atlas RAG Gateway]
 	Gateway -->|question embedding| Embeddings[MongoDB AI Models API]
-	Gateway -->|vector search| Atlas[MongoDB Atlas]
+	Gateway -->|vector + optional text search| Atlas[MongoDB Atlas]
 	Atlas -->|ranked evidence| Gateway
 	Gateway -->|grounded prompt| Ollama[Local Ollama]
 	Ollama -->|answer| Client
@@ -30,7 +30,7 @@ The design favors local control where it matters most to interactive use, while 
 
 - **Local generation:** Ollama serves the chat model on the configured local or controlled host. Chat prompts and generated answers go to that service rather than to a hosted generation API.
 - **Semantic embeddings:** the default `voyage-3.5` model, called through MongoDB's AI Models API, turns both passages and questions into 1024-dimensional vectors. This gives retrieval a purpose-built semantic representation rather than relying only on exact word matches.
-- **Managed vector search:** MongoDB Atlas stores chunks, metadata, and vectors, and runs tenant-filtered nearest-neighbor search.
+- **Managed retrieval:** MongoDB Atlas stores chunks, metadata, and vectors, and runs tenant-filtered vector search plus optional lexical search.
 - **A compatible gateway:** FastAPI handles ingestion, retrieval, prompt assembly, authentication, and OpenAI/Ollama-compatible chat routes. Clients select the public model name `rag-local`; the gateway chooses the configured Ollama model behind it.
 
 ```mermaid
@@ -43,7 +43,7 @@ flowchart TB
 	end
 	subgraph Managed[MongoDB services]
 		AI[AI Models API for embeddings]
-		Atlas[Atlas vector search and Native Reranking]
+		Atlas[Atlas vector and text search, Native Reranking]
 	end
 	Gateway --> AI
 	Gateway --> Atlas
@@ -67,4 +67,4 @@ These tools make it possible to test with a small corpus and known questions bef
 
 Open WebUI remains the conversational interface; Hermes remains the agent. The gateway does not try to replace either one or change their personalities. It gives them a shared, current, tenant-scoped evidence source, so their answers can be more relevant to the documents a user is allowed to query. If the evidence is missing or falls below the configured score threshold, the gateway asks the model not to invent source-backed facts. This reduces one failure mode, but it is not a correctness guarantee.
 
-The project is intentionally transparent about what remains unfinished: chunking is character-based, hybrid search is not implemented, deleted source files are not synchronized automatically, and the evaluation tool does not score generated answers. Atlas Reranking is an optional Gateway setting, disabled by default; enabling it sends the query and candidate text to MongoDB's reranking service and may add latency and usage-based charges. The next improvements should be chosen using representative questions, inspected retrieval results, measured latency and cost, and the data policies of the environment where the gateway will run.
+The project is intentionally transparent about what remains unfinished: chunking is character-based, deleted source files are not synchronized automatically, and the evaluation tool does not score generated answers. Hybrid search is optional and requires a separate Atlas Search index; its query text is processed by Atlas and its fused score is not comparable to the vector-only threshold. Atlas Reranking is also an optional Gateway setting, disabled by default; enabling it sends the query and candidate text to MongoDB's reranking service and may add latency and usage-based charges. The next improvements should be chosen using representative questions, inspected retrieval results, measured latency and cost, and the data policies of the environment where the gateway will run.

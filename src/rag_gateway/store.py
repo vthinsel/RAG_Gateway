@@ -34,6 +34,16 @@ class AtlasStore:
             queryable = index.get("status") == "READY"
         return True, queryable
 
+    def search_index_status(self) -> tuple[bool, bool]:
+        indexes = list(self.collection.list_search_indexes(name=self.settings.atlas_search_index))
+        if not indexes:
+            return False, False
+        index = indexes[0]
+        queryable = index.get("queryable")
+        if not isinstance(queryable, bool):
+            queryable = index.get("status") == "READY"
+        return True, queryable
+
     def list_tenant_ids(self) -> list[str]:
         tenant_ids = self.collection.distinct("tenant_id")
         return sorted(tenant_id for tenant_id in tenant_ids if isinstance(tenant_id, str))
@@ -164,12 +174,24 @@ class AtlasStore:
         limit: int,
         query: str | None = None,
         rerank_enabled: bool | None = None,
+        hybrid_enabled: bool | None = None,
     ) -> list[dict[str, Any]]:
         if rerank_enabled is None:
             rerank_enabled = self.settings.retrieval_rerank_enabled
+        if hybrid_enabled is None:
+            hybrid_enabled = getattr(self.settings, "retrieval_hybrid_enabled", False)
         rerank_limit = max(self.settings.retrieval_rerank_candidates, limit)
-        if rerank_enabled and query is None:
-            raise ValueError("A text query is required when retrieval reranking is enabled")
+        hybrid_limit = max(getattr(self.settings, "retrieval_hybrid_candidates", limit), limit)
+        if (rerank_enabled or hybrid_enabled) and query is None:
+            raise ValueError("A text query is required when reranking or hybrid search is enabled")
+        if hybrid_enabled and rerank_enabled:
+            vector_limit = min(hybrid_limit, rerank_limit)
+        elif hybrid_enabled:
+            vector_limit = hybrid_limit
+        elif rerank_enabled:
+            vector_limit = rerank_limit
+        else:
+            vector_limit = limit
 
         pipeline = [
             {
@@ -179,15 +201,15 @@ class AtlasStore:
                     "queryVector": query_vector,
                     "numCandidates": max(
                         self.settings.retrieval_num_candidates,
-                        rerank_limit if rerank_enabled else limit,
+                        vector_limit,
                     ),
-                    "limit": rerank_limit if rerank_enabled else limit,
+                    "limit": vector_limit,
                     "filter": {"tenant_id": {"$eq": tenant_id}},
                 }
             },
             {
                 "$project": {
-                    "_id": 0,
+                    "_id": 1,
                     "document_id": 1,
                     "chunk_index": 1,
                     "text": 1,
@@ -204,13 +226,61 @@ class AtlasStore:
                             "model": self.settings.retrieval_rerank_model,
                             "query": {"text": query},
                             "path": "text",
-                            "numDocsToRerank": rerank_limit,
+                            "numDocsToRerank": vector_limit,
                         }
                     },
                     {"$addFields": {"rerank_score": {"$meta": "score"}}},
                 ]
             )
-        candidates = list(self.collection.aggregate(pipeline))
+        vector_candidates = list(self.collection.aggregate(pipeline))
+        if hybrid_enabled:
+            lexical_pipeline = [
+                {
+                    "$search": {
+                        "index": self.settings.atlas_search_index,
+                        "compound": {
+                            "must": [{"text": {"query": query, "path": "text"}}],
+                            "filter": [
+                                {"equals": {"path": "tenant_id", "value": tenant_id}}
+                            ],
+                        },
+                    }
+                },
+                {"$limit": hybrid_limit},
+                {
+                    "$project": {
+                        "_id": 1,
+                        "document_id": 1,
+                        "chunk_index": 1,
+                        "text": 1,
+                        "metadata": 1,
+                        "score": {"$meta": "searchScore"},
+                    }
+                },
+            ]
+            lexical_candidates = list(self.collection.aggregate(lexical_pipeline))
+            fused: dict[Any, dict[str, Any]] = {}
+            for candidates, score_field in (
+                (vector_candidates, "vector_score"),
+                (lexical_candidates, "lexical_score"),
+            ):
+                for rank, candidate in enumerate(candidates, start=1):
+                    candidate_id = candidate.get("_id")
+                    if candidate_id is None:
+                        candidate_id = (candidate.get("document_id"), candidate.get("chunk_index"))
+                    result = fused.get(candidate_id)
+                    if result is None:
+                        result = {key: value for key, value in candidate.items() if key != "score"}
+                        result["score"] = 0.0
+                        fused[candidate_id] = result
+                    result[score_field] = candidate.get("score")
+                    result["score"] += 1 / (60 + rank)
+            results = sorted(fused.values(), key=lambda item: item["score"], reverse=True)
+            for result in results:
+                result.pop("_id", None)
+            return results[:limit]
+
+        candidates = vector_candidates
         matches = [
             candidate
             for candidate in candidates
@@ -234,4 +304,6 @@ class AtlasStore:
                     tenant_id,
                     self.settings.atlas_vector_index,
                 )
+        for match in matches:
+            match.pop("_id", None)
         return matches[:limit]

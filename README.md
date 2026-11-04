@@ -2,7 +2,7 @@
 
 > **Project status:** Atlas RAG Gateway is an independent personal project. It is not affiliated with, sponsored by, or endorsed by MongoDB, Inc.
 
-A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with the configured model through MongoDB's AI Models API, retrieves matching chunks from MongoDB Atlas Vector Search, and sends the augmented conversation to a model served by local Ollama.
+A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with the configured model through MongoDB's AI Models API, retrieves matching chunks from MongoDB Atlas Vector Search, optionally fuses them with Atlas Search text results, and sends the augmented conversation to a model served by local Ollama.
 
 ![landingpage](docs/RAG-gateway-landingpage.png)
 
@@ -10,7 +10,7 @@ The project is built around a practical balance: keep answer generation on infra
 
 Read the [story behind the project](docs/project-story.md), the [beginner's guide in English](docs/beginner-guide-rag-gateway.md), or the [guide en français](docs/guide-debutant-rag-gateway.md) for the architecture, workflows, and user-facing tools.
 
-> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; if reranking is enabled, query text and candidate chunk text are also processed by MongoDB's Native Reranking service. Chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
+> **Data boundary:** this is not a fully on-premises stack. Document text and query text are sent to the configured MongoDB AI model endpoint for embedding; if reranking is enabled, query text and candidate chunk text are also processed by MongoDB's Native Reranking service. Hybrid search sends query text to Atlas Search; chunks, metadata, and vectors are stored in MongoDB Atlas. Chat generation stays on your Ollama host. Check your organization's data classification, MongoDB AI model terms, Atlas region, retention, and network policy before ingesting real data.
 
 ## Architecture
 
@@ -27,13 +27,13 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 | --- | --- | --- |
 | Python 3.11+ / FastAPI | Ingestion, retrieval, OpenAI-compatible chat endpoint | Your workstation or on-prem host |
 | MongoDB AI Models API | Shared embedding model for documents and queries | MongoDB AI model endpoint |
-| MongoDB Atlas Vector Search | Chunks, metadata, vectors, filtered nearest-neighbor search | MongoDB Atlas |
+| MongoDB Atlas Vector Search and Atlas Search | Chunks, metadata, vectors, filtered semantic and optional lexical search | MongoDB Atlas |
 | Ollama | Local chat completion model | Already-running local/on-prem service |
 | Open WebUI / Hermes | User and agent clients | Your local environment |
 
 The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns and uses tenant-filtered Atlas vector search. Optional Atlas Native Reranking can reorder up to `RETRIEVAL_RERANK_CANDIDATES` vector results using the query and each chunk's text before the Gateway applies `RETRIEVAL_MIN_SCORE` to the original vector scores and returns up to `RETRIEVAL_TOP_K` chunks. Reranking is disabled by default; enabling it requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings. It is usage-billed and sends the query and candidate text to MongoDB's reranking service; review the service's current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync, hybrid search, and document-level ACL filtering remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns and uses tenant-filtered Atlas vector search. Optional hybrid search adds tenant-filtered Atlas Search text results and combines both ranked lists with reciprocal-rank fusion; it is disabled by default and requires the `rag_chunks_text` Atlas Search index. Set `RETRIEVAL_HYBRID_ENABLED=true` or send `hybrid_enabled: true` per request. Optional Atlas Native Reranking can reorder vector candidates and requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings. Reranking sends the query and candidate text to MongoDB's reranking service; review its current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync and document-level ACL filtering remain later phases.
 
 ## Build Plan
 
@@ -41,7 +41,7 @@ The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document lo
 2. **Prepare Atlas.** Create or select a cluster in the intended region. Create a database user scoped to read/write on the gateway database, allow only the gateway's egress IP in Atlas Network Access, and use the Atlas-provided SRV connection string. Avoid broad `0.0.0.0/0` access for normal use.
 3. **Prepare the MongoDB AI Models API.** Configure its API key and endpoint in `.env`. Set the model and its output dimension. Embedding model changes require re-embedding documents and recreating or migrating the vector index.
 4. **Run the local service.** Configure `.env`, install the project in the Miniconda environment, check that Ollama serves the chosen model, then start FastAPI. Docker is optional packaging.
-5. **Create the Atlas vector index.** In Atlas Data Explorer, open the configured database and collection, create a Vector Search index named `rag_chunks_vector`, and use the JSON in [`src/rag_gateway/infra_atlas-vector-index.json`](src/rag_gateway/infra_atlas-vector-index.json). It uses 1024-dimensional cosine similarity with scalar quantization and declares `tenant_id`, `document_id`, `embedding_model`, and `chunk_policy` as filter fields. Wait until Atlas reports the index ready before testing retrieval. The service does not update an existing managed index automatically.
+5. **Create the Atlas indexes.** Create the Vector Search index named `rag_chunks_vector` from [`src/rag_gateway/infra_atlas-vector-index.json`](src/rag_gateway/infra_atlas-vector-index.json). If enabling hybrid search, also create an Atlas Search index named `rag_chunks_text` from [`infra/atlas-search-index.json`](infra/atlas-search-index.json). It indexes chunk `text` and tokenized `tenant_id` for lexical retrieval and tenant filtering. Wait until each required index is ready; the service does not create or update managed indexes automatically.
 6. **Ingest a small, non-sensitive corpus.** Start with a few Markdown/text files. Check ingestion counts, run retrieval, inspect scores and source text, then ask known-answer questions through chat. Confirm a question with no matching evidence is handled as unknown.
 7. **Connect Open WebUI.** Add an OpenAI-compatible connection with base URL `http://localhost:8000/v1` when Open WebUI runs on the host. If Open WebUI runs in Docker, use `http://host.docker.internal:8000/v1` and ensure the gateway is reachable from that container. Set its API key to `GATEWAY_API_KEY` when using shared-key mode, or to a registered key when `API_KEY_REGISTRY` is enabled; select model `rag-local` and send the authorized tenant in `X-Tenant-ID`.
 8. **Connect Hermes.** Configure its OpenAI-compatible provider/base URL as above, set the shared or tenant-registered key, and select `rag-local`. If your Hermes build does not support a custom OpenAI-compatible base URL, call `POST /v1/chat/completions` from its HTTP/API tool; keep the gateway key in the agent's secret store, not prompts or repository files.
@@ -147,6 +147,10 @@ Create the collection in Atlas Data Explorer first, or start the gateway once af
 
 The dimensions in the index must match the configured embedding model output and `EMBEDDING_DIMENSIONS`. If you change the model or dimensions later, re-embed the corpus and create/migrate the index deliberately; editing the JSON file alone does not change an index already deployed in Atlas. The default score cutoff is `0.72`; calibrate `RETRIEVAL_MIN_SCORE` against representative queries.
 
+### Configure Atlas Search for Hybrid Retrieval
+
+Hybrid retrieval uses two indexes on the same collection: the Vector Search index above and a separate Atlas Search index. In Atlas Data Explorer, create a Search index using [`infra/atlas-search-index.json`](infra/atlas-search-index.json), name it `rag_chunks_text` (or set `ATLAS_SEARCH_INDEX` to another name), and wait until it is queryable. The definition indexes `text` with `lucene.standard` and `tenant_id` as a token field for exact tenant filtering. Enable hybrid retrieval with `RETRIEVAL_HYBRID_ENABLED=true`, or pass `hybrid_enabled: true` to `POST /v1/retrieve` or chat requests. `RETRIEVAL_HYBRID_CANDIDATES` controls the maximum candidates from each branch before fusion. Hybrid `score` is an RRF score and is not comparable to the vector-only `RETRIEVAL_MIN_SCORE`; branch scores are returned as `vector_score` and `lexical_score` when available.
+
 ### Ingest local files
 
 Put `.txt` or `.md` files in a directory, then run in another shell with the Conda environment active:
@@ -198,7 +202,7 @@ When `API_KEY_REGISTRY` is enabled, use the raw secret corresponding to a regist
 
 ```bash
 curl -H "Authorization: Bearer ${GATEWAY_API_KEY}" http://127.0.0.1:8000/v1/models
-curl -X POST http://127.0.0.1:8000/v1/retrieve -H "Authorization: Bearer ${GATEWAY_API_KEY}" -H "Content-Type: application/json" -H "X-Tenant-ID: default" -d '{"query":"What does the policy say about retention?"}'
+curl -X POST http://127.0.0.1:8000/v1/retrieve -H "Authorization: Bearer ${GATEWAY_API_KEY}" -H "Content-Type: application/json" -H "X-Tenant-ID: default" -d '{"query":"What does the policy say about retention?","hybrid_enabled":true}'
 curl -X POST http://127.0.0.1:8000/v1/chat/completions -H "Authorization: Bearer ${GATEWAY_API_KEY}" -H "Content-Type: application/json" -H "X-Tenant-ID: default" -d '{"model":"rag-local","messages":[{"role":"user","content":"What does the policy say about retention?"}],"stream":false}'
 ```
 
