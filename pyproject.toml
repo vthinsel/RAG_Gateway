@@ -42,7 +42,7 @@ loader = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-rag_gateway = ["static/*.html"]
+rag_gateway = ["static/*.html", "static/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

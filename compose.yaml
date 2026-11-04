@@ -1,9 +1,11 @@
 services:
   rag-gateway:
     build: .
+    working_dir: /var/lib/rag-gateway
     env_file:
       - .env
     environment:
+      RAG_GATEWAY_DOTENV_PRECEDENCE: "true"
       OLLAMA_BASE_URL: "${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}"
       OPERATIONS_DB_PATH: /var/lib/rag-gateway/operations.sqlite3
     ports:

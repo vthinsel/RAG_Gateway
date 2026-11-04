@@ -572,10 +572,17 @@ def test_welcome_page_and_global_status(
         with TestClient(app) as client:
             app.state.store = FakeStore()
             page_response = client.get("/")
+            playground_response = client.get("/tools/playground")
+            favicon_response = client.get("/favicon.svg")
             status_response = client.get("/v1/status")
 
         assert page_response.status_code == 200
         assert "Atlas RAG Gateway" in page_response.text
+        assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in page_response.text
+        assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in playground_response.text
+        assert favicon_response.status_code == 200
+        assert favicon_response.headers["content-type"] == "image/svg+xml"
+        assert "<svg" in favicon_response.text
         assert "/tools/chunks" in page_response.text
         assert "/tools/document-loader" in page_response.text
         assert "/tools/environment" in page_response.text

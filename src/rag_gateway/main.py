@@ -475,6 +475,14 @@ async def welcome_page() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "welcome.html")
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon() -> FileResponse:
+    return FileResponse(
+        Path(__file__).parent / "static" / "favicon.svg",
+        media_type="image/svg+xml",
+    )
+
+
 @app.get("/v1/status", include_in_schema=False)
 async def gateway_status(
     request: Request,

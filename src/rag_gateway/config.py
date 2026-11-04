@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     mongodb_database: str = "rag_gateway"
     mongodb_collection: str = "chunks"
     atlas_vector_index: str = "rag_chunks_vector"
-    voyage_embedding_model: str = "voyage-3.5"
+    voyage_embedding_model: str = "voyage-4"
     embedding_dimensions: int = Field(default=1024, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1, le=128)
     ollama_base_url: str = "http://localhost:11434/v1"
