@@ -302,6 +302,7 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `EMBEDDING_DIMENSIONS` | `1024` | Must match model output and Atlas index |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local Ollama OpenAI-compatible API |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Exact locally installed model tag |
+| `OLLAMA_REASONING_EFFORT` | empty | Optional model-supported reasoning level; blank preserves the model default |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `150` | Character-based chunking; tune with evaluation |
 | `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one embedding request (also constrained by the estimated token budget) |
 | `RETRIEVAL_TOP_K` | `5` | Maximum retrieved chunks per request |
@@ -334,7 +335,7 @@ ruff check src tests scripts
 - Chunking is character-based and does not preserve Markdown section structure. DOCX/PPTX extraction currently reads text and tables but not embedded images; the configured Ollama OCR model is used for PDF pages and standalone image files.
 - This starter stores chunk text and vectors together in Atlas. Atlas and its AI model endpoint are cloud services; do not ingest restricted content without approval.
 - Tenant-scoped API keys are optional and configured statically through `API_KEY_REGISTRY`. There is no user identity provider, dynamic tenant provisioning, or document-level ACL enforcement.
-- Retrieval uses tenant-filtered vector search and optionally the Atlas `$rerank` stage. Reranking requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings; the `rerank-3` and `rerank-3-lite` models additionally require an M10+ cluster. Hybrid full-text/vector retrieval, additional metadata/ACL filters, and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
+- Retrieval uses tenant-filtered vector search, optional Atlas Search hybrid fusion, and optionally the Atlas `$rerank` stage. Hybrid search requires the separate `rag_chunks_text` Atlas Search index. Reranking requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings; the `rerank-3` and `rerank-3-lite` models additionally require an M10+ cluster. Additional metadata/ACL filters and query rewriting are not implemented; evaluate them against a labeled test set before adding them.
 - Embedding model, dimensions, chunking policy, and per-chunk content hash are recorded, but there is no automated re-embedding migration, incremental ingestion manifest, or deleted-file synchronization.
 - Chunking still normalizes text into character-based chunks and does not preserve Markdown section structure. Chat and retrieve request bodies also use manual rather than complete typed-schema validation.
 - The retrieval evaluation workbench measures retrieval against manually labeled document IDs. It does not evaluate answer correctness, citation quality, or model behavior. MongoDB Native Reranking may incur usage-based charges.

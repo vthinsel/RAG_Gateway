@@ -1751,6 +1751,20 @@ def _chat_payload(body: dict[str, Any], messages: list[dict[str, Any]], settings
         "stream": bool(body.get("stream", False)),
     }
     payload.update({key: body[key] for key in forwarded_keys if key in body})
+    if "reasoning_effort" in body:
+        reasoning_effort = body["reasoning_effort"]
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            raise HTTPException(status_code=422, detail="reasoning_effort must be a string or null")
+        if isinstance(reasoning_effort, str):
+            reasoning_effort = reasoning_effort.strip()
+            if len(reasoning_effort) > 64 or any(
+                character in reasoning_effort for character in "\r\n"
+            ):
+                raise HTTPException(status_code=422, detail="Invalid reasoning_effort")
+    else:
+        reasoning_effort = settings.ollama_reasoning_effort
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     return payload
 
 

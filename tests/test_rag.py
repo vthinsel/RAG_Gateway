@@ -887,6 +887,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
     settings = Settings(
         _env_file=None,
         gateway_api_key="playground-admin-key",
+        ollama_reasoning_effort="low",
         api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
     )
     searches: list[tuple[str, int, bool | None, bool | None]] = []
@@ -969,6 +970,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                         "stream": False,
                         "rerank_enabled": False,
                         "hybrid_enabled": True,
+                        "reasoning_effort": "high",
                     },
                 )
                 tenant_scope_response = client.post(
@@ -999,11 +1001,14 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         assert "rerank_enabled: rerankEnabled" in page.text
         assert 'id="hybrid-enabled" type="checkbox"' in page.text
         assert "hybrid_enabled: hybridEnabled" in page.text
+        assert 'id="reasoning-effort"' in page.text
+        assert "chatBody.reasoning_effort = reasoningEffort" in page.text
         assert response.status_code == 200
         assert tenant_scope_response.status_code == 403
         assert invalid_top_k_response.status_code == 422
         assert response.json()["choices"][0]["message"]["content"] == "It opens at 08:00. [S1]"
         assert response.json()["sources"][0]["document_id"] == "guide.md"
+        assert upstream_payloads[0]["reasoning_effort"] == "high"
         assert searches == [("tenant-b", 2, False, True)]
         assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]
     finally:
@@ -1081,6 +1086,18 @@ def test_ollama_api_chat_adapts_non_streaming_request(
     assert response.json()["message"] == {"role": "assistant", "content": "Answer from RAG"}
     assert response.json()["sources"] == [{"citation": "S1"}]
     assert response.json()["done"] is True
+
+
+def test_chat_payload_uses_configured_reasoning_effort_and_request_override() -> None:
+    settings = Settings(_env_file=None, ollama_reasoning_effort="low")
+
+    configured = main._chat_payload({}, [], settings)
+    overridden = main._chat_payload({"reasoning_effort": "high"}, [], settings)
+    model_default = main._chat_payload({"reasoning_effort": None}, [], settings)
+
+    assert configured["reasoning_effort"] == "low"
+    assert overridden["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in model_default
 
 
 def test_ollama_api_chat_adapts_streaming_response(monkeypatch: pytest.MonkeyPatch) -> None:

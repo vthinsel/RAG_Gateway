@@ -43,6 +43,11 @@
     td.model { overflow-wrap: anywhere; }
     td.actions { text-align: right; white-space: nowrap; }
     td.actions button { min-height: 34px; padding: 4px 9px; margin: 2px; }
+    .model-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin: 0 0 14px; }
+    .model-facts div { min-width: 0; border-bottom: 1px solid var(--line); padding: 6px 0; }
+    .model-facts dt { color: var(--muted); font-size: 12px; }
+    .model-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+    #reasoning-options { white-space: pre-line; }
     pre { max-height: 420px; overflow: auto; padding: 12px; border-radius: 4px; background: #edf2ee; white-space: pre-wrap; overflow-wrap: anywhere; }
     @media (max-width: 640px) {
       header { padding: 20px; }
@@ -133,6 +138,11 @@
     </section>
     <section>
       <h2>Model details / last operation</h2>
+      <div id="model-summary" hidden>
+        <dl id="model-facts" class="model-facts"></dl>
+        <h3>Reasoning options</h3>
+        <p id="reasoning-options" class="muted"></p>
+      </div>
       <pre id="details" aria-live="polite">Model details and operation results will appear here.</pre>
     </section>
     <datalist id="model-names"></datalist>
@@ -145,6 +155,9 @@
     const runningBody = document.querySelector("#running");
     const modelNames = document.querySelector("#model-names");
     const details = document.querySelector("#details");
+    const modelSummary = document.querySelector("#model-summary");
+    const modelFacts = document.querySelector("#model-facts");
+    const reasoningOptions = document.querySelector("#reasoning-options");
 
     function showMessage(text, failed = false) {
       message.textContent = text;
@@ -178,10 +191,55 @@
       return button;
     }
 
+    function renderModelDetails(result) {
+      modelSummary.hidden = true;
+      modelFacts.replaceChildren();
+      reasoningOptions.textContent = "";
+      if (!result || typeof result !== "object") return;
+
+      const modelDetails = result.details && typeof result.details === "object"
+        ? result.details
+        : {};
+      const facts = [
+        ["Family", modelDetails.family],
+        ["Families", modelDetails.families],
+        ["Parameters", modelDetails.parameter_size],
+        ["Quantization", modelDetails.quantization_level],
+        ["Format", modelDetails.format],
+        ["Capabilities", result.capabilities]
+      ];
+      for (const [label, value] of facts) {
+        if (value === undefined || value === null || value === "") continue;
+        const fact = document.createElement("div");
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        term.textContent = label;
+        description.textContent = Array.isArray(value) ? value.join(", ") : String(value);
+        fact.append(term, description);
+        modelFacts.append(fact);
+      }
+
+      const thinking = result.thinking;
+      if (thinking && typeof thinking === "object") {
+        const supported = Array.isArray(thinking.values)
+          ? thinking.values.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(", ")
+          : "Not reported";
+        const defaultValue = "default" in thinking
+          ? typeof thinking.default === "string" ? thinking.default : JSON.stringify(thinking.default)
+          : "Not reported";
+        reasoningOptions.textContent = `Supported: ${supported}\nDefault: ${defaultValue}`;
+      } else {
+        reasoningOptions.textContent = "Ollama did not report reasoning options for this model.";
+      }
+      modelSummary.hidden = false;
+    }
+
     async function operate(label, path, method = "POST", payload) {
       showMessage(`${label}...`);
+      renderModelDetails(null);
       try {
         const result = await api(path, method, payload);
+        if (path.endsWith("/show")) renderModelDetails(result);
         const changesModels = ["/pull", "/copy", "/context", "/delete", "/stop"].some(
           suffix => path.endsWith(suffix)
         );
@@ -281,6 +339,7 @@
         renderModels(installed.models || []);
         renderRunning(running.models || []);
         if (announce) {
+          renderModelDetails(null);
           details.textContent = JSON.stringify({ version }, null, 2);
           showMessage(`Connected to Ollama ${version.version || ""}.`);
         }

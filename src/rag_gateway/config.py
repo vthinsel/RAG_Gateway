@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=64, ge=1, le=128)
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "qwen2.5:7b"
+    ollama_reasoning_effort: str = Field(default="", max_length=64)
     public_model_name: str = "rag-local"
     default_tenant_id: str = "default"
     chunk_size: int = Field(default=1200, ge=200)
@@ -72,6 +73,14 @@ class Settings(BaseSettings):
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         return self
+
+    @field_validator("ollama_reasoning_effort")
+    @classmethod
+    def normalize_ollama_reasoning_effort(cls, value: str) -> str:
+        value = value.strip()
+        if any(character in value for character in "\r\n"):
+            raise ValueError("OLLAMA_REASONING_EFFORT must not contain line breaks")
+        return value
 
 
 @lru_cache

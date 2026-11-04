@@ -31,7 +31,15 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
         elif path == "/api/version":
             result = {"version": "0.1.0"}
         elif path == "/api/show":
-            result = {"modelfile": "FROM qwen:latest"}
+            result = {
+                "modelfile": "FROM qwen:latest",
+                "details": {
+                    "family": "qwen",
+                    "parameter_size": "7B",
+                    "quantization_level": "Q4_K_M",
+                },
+                "thinking": {"values": ["low", "medium", "high"], "default": "medium"},
+            }
         elif path == "/api/generate":
             result = {"done": True}
         else:
@@ -46,6 +54,8 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
             assert page.status_code == 200
             assert "Ollama management" in page.text
             assert "/v1/admin/ollama/context" in page.text
+            assert "Reasoning options" in page.text
+            assert "renderModelDetails" in page.text
             assert client.get("/").status_code == 200
             assert 'href="/tools/ollama"' in client.get("/").text
 
@@ -89,12 +99,15 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
                 ).status_code
                 == 200
             )
-            assert (
-                client.post(
-                    "/v1/admin/ollama/show", headers=headers, json={"model": "qwen:latest"}
-                ).status_code
-                == 200
+            show_response = client.post(
+                "/v1/admin/ollama/show", headers=headers, json={"model": "qwen:latest"}
             )
+            assert show_response.status_code == 200
+            assert show_response.json()["thinking"] == {
+                "values": ["low", "medium", "high"],
+                "default": "medium",
+            }
+            assert show_response.json()["details"]["family"] == "qwen"
             assert (
                 client.post(
                     "/v1/admin/ollama/stop", headers=headers, json={"model": "qwen:latest"}

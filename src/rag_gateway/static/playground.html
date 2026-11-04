@@ -90,6 +90,11 @@
           <option value="retrieve">Retrieve sources only</option>
         </select>
       </div>
+      <div class="field">
+        <label for="reasoning-effort">Reasoning effort</label>
+        <input id="reasoning-effort" maxlength="64" placeholder="Use configured default">
+        <span class="note">Chat only. Leave blank for OLLAMA_REASONING_EFFORT; enter a model-supported level such as low, medium, high, or none.</span>
+      </div>
       <label class="checkbox-field" for="rerank-enabled">
         <input id="rerank-enabled" type="checkbox">
         Enable reranking for this request
@@ -125,6 +130,15 @@
     const sources = document.querySelector("#sources");
     const answerPanel = document.querySelector("#answer-panel");
     const answer = document.querySelector("#answer");
+    const mode = document.querySelector("#mode");
+    const reasoningEffortInput = document.querySelector("#reasoning-effort");
+
+    function updateReasoningEffortState() {
+      reasoningEffortInput.disabled = mode.value === "retrieve";
+    }
+
+    mode.addEventListener("change", updateReasoningEffortState);
+    updateReasoningEffortState();
 
     function renderSources(items, includeText) {
       sources.replaceChildren();
@@ -172,29 +186,32 @@
         const topK = Number(document.querySelector("#top-k").value);
         const rerankEnabled = document.querySelector("#rerank-enabled").checked;
         const hybridEnabled = document.querySelector("#hybrid-enabled").checked;
+        const reasoningEffort = reasoningEffortInput.value.trim();
         if (!token) throw new Error("Enter a gateway bearer token.");
         if (!query) throw new Error("Enter a question.");
         if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
         if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Sources to retrieve must be between 1 and 50.");
 
-        const mode = document.querySelector("#mode").value;
-        const response = await fetch(mode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions", {
+        const selectedMode = mode.value;
+        const chatBody = {
+          model: "rag-local",
+          messages: [{ role: "user", content: query }],
+          stream: false,
+          top_k: topK,
+          rerank_enabled: rerankEnabled,
+          hybrid_enabled: hybridEnabled
+        };
+        if (reasoningEffort) chatBody.reasoning_effort = reasoningEffort;
+        const response = await fetch(selectedMode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions", {
           method: "POST",
           headers: {
             "Authorization": ["Bearer", token].join(" "),
             "X-Tenant-ID": tenant,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(mode === "retrieve"
+          body: JSON.stringify(selectedMode === "retrieve"
             ? { query, top_k: topK, rerank_enabled: rerankEnabled, hybrid_enabled: hybridEnabled }
-            : {
-                model: "rag-local",
-                messages: [{ role: "user", content: query }],
-                stream: false,
-                top_k: topK,
-                rerank_enabled: rerankEnabled,
-                hybrid_enabled: hybridEnabled
-              })
+            : chatBody)
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -212,7 +229,7 @@
           renderSources(data.sources || [], false);
         }
         message.style.color = "#176f5b";
-        message.textContent = mode === "retrieve" ? "Retrieval complete." : "RAG answer complete.";
+        message.textContent = selectedMode === "retrieve" ? "Retrieval complete." : "RAG answer complete.";
       } catch (error) {
         message.style.color = "#a63d35";
         message.textContent = error.message;

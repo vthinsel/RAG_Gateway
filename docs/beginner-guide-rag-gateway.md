@@ -45,6 +45,10 @@ Native Reranking requires MongoDB 9.0 or later and must be enabled in Atlas proj
 
 Hybrid retrieval runs tenant-filtered vector search and Atlas Search text search, then merges both ranked lists using reciprocal-rank fusion (RRF). This can find semantically related passages as well as passages containing important terms. It is opt-in: set `RETRIEVAL_HYBRID_ENABLED=true`, or enable it for one request with `hybrid_enabled: true`. Create a separate Atlas Search index named `ATLAS_SEARCH_INDEX` (default `rag_chunks_text`) using [`infra/atlas-search-index.json`](../infra/atlas-search-index.json); it maps chunk `text` and tokenized `tenant_id`. Hybrid `score` is the fused rank score, not the vector score, so `RETRIEVAL_MIN_SCORE` applies only to vector-only results. The response includes branch scores when available.
 
+### Reasoning effort: tune Ollama thinking
+
+Set `OLLAMA_REASONING_EFFORT` to a level supported by the configured Ollama model; leave it blank to keep that model's default. The playground's **Reasoning effort** field can override the setting for one chat request. Values are model-specific, so check the model's Ollama metadata; unsupported levels may fall back to its default. This option configures thinking effort and does not expose the model's reasoning trace in the playground.
+
 ## 2. At a Glance
 
 The system has a local part and cloud services. Text sent to MongoDB's AI model endpoint for embeddings and chunks/vectors stored in Atlas leave the local environment. Answer generation stays on the configured Ollama service.
