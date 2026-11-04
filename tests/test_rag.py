@@ -1002,7 +1002,11 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         assert 'id="hybrid-enabled" type="checkbox"' in page.text
         assert "hybrid_enabled: hybridEnabled" in page.text
         assert 'id="reasoning-effort"' in page.text
-        assert "chatBody.reasoning_effort = reasoningEffort" in page.text
+        assert "function chatPayload(" in page.text
+        assert 'reasoningEffort: "none"' in page.text
+        assert "const reasoningOnEffort = inputs.reasoningEffort.toLowerCase()" in page.text
+        assert "combinations.push({ ...reasoning, rerankEnabled, hybridEnabled })" in page.text
+        assert "Reasoning ${reasoning}" in page.text
         assert response.status_code == 200
         assert tenant_scope_response.status_code == 403
         assert invalid_top_k_response.status_code == 422

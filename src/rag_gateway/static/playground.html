@@ -19,6 +19,7 @@
       --yellow: #f0c663;
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 "Segoe UI", "Aptos", sans-serif; }
     header { background: #153b3e; color: #f6f8f3; padding: 28px max(24px, calc((100vw - 1060px) / 2)); border-bottom: 5px solid var(--yellow); }
     header h1 { margin: 0; font-size: 25px; }
@@ -40,9 +41,27 @@
     .two { display: grid; grid-template-columns: 1fr 180px; gap: 12px; }
     .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
     button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: #fff; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--green); }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .note { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
     #message { min-height: 22px; color: var(--red); margin: 9px 0 0; }
+    .activity { display: flex; align-items: center; gap: 9px; color: var(--green); font-weight: 650; }
+    .activity[hidden] { display: none; }
+    .activity::before { width: 14px; height: 14px; border: 2px solid #b7d6c9; border-top-color: var(--green); border-radius: 50%; content: ""; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 9px; }
+    .metric { min-width: 0; border-left: 3px solid #8bb9a8; background: #f4f8f4; padding: 10px; }
+    .metric strong { display: block; overflow-wrap: anywhere; font-size: 19px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #294549; font-size: 13px; }
+    td { overflow-wrap: anywhere; }
+    td.result-detail { min-width: 260px; white-space: normal; }
+    td.result-detail p { margin: 6px 0; white-space: pre-wrap; }
+    td.result-detail summary { color: var(--green); cursor: pointer; font-weight: 650; }
+    .failed { color: var(--red); }
     #answer { white-space: pre-wrap; overflow-wrap: anywhere; }
     .source-list { display: grid; gap: 10px; }
     .source { border: 1px solid var(--line); border-left: 4px solid #8bb9a8; border-radius: 4px; padding: 12px; }
@@ -93,7 +112,7 @@
       <div class="field">
         <label for="reasoning-effort">Reasoning effort</label>
         <input id="reasoning-effort" maxlength="64" placeholder="Use configured default">
-        <span class="note">Chat only. Leave blank for OLLAMA_REASONING_EFFORT; enter a model-supported level such as low, medium, high, or none.</span>
+        <span class="note">Chat only. Leave blank for OLLAMA_REASONING_EFFORT. Benchmark reasoning-on uses this level or high when blank; reasoning-off sends none.</span>
       </div>
       <label class="checkbox-field" for="rerank-enabled">
         <input id="rerank-enabled" type="checkbox">
@@ -107,11 +126,32 @@
         <label for="query">Question</label>
         <textarea id="query" maxlength="8000" placeholder="Ask a question about your ingested documents" required></textarea>
       </div>
+      <div class="field">
+        <label for="expected-documents">Expected document IDs (optional)</label>
+        <input id="expected-documents" maxlength="2000" placeholder="retention-policy.md, service-handbook.md">
+      </div>
       <div class="buttons">
         <button id="submit" type="button">Run</button>
+        <button id="benchmark" class="secondary" type="button">Benchmark all 4 combinations</button>
       </div>
+      <p class="note">Benchmark runs the same chat question across all eight reranking, hybrid-search, and reasoning on/off combinations. Expected document IDs measure source hit rate, not answer correctness.</p>
+      <p id="activity" class="activity" role="status" aria-live="polite" hidden></p>
       <p class="note">Chat mode calls the configured local model and includes source citations. Retrieval-only mode shows the matching chunks without generating an answer. Reranking and hybrid search are disabled unless selected here, regardless of the server defaults. Query text is sent to the configured embedding service.</p>
       <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section id="summary-panel" aria-labelledby="summary-title" hidden>
+      <h2 id="summary-title">Processing summary</h2>
+      <div id="summary-metrics" class="metrics"></div>
+      <p id="summary-note" class="note"></p>
+    </section>
+    <section id="benchmark-panel" aria-labelledby="benchmark-title" hidden>
+      <h2 id="benchmark-title">Option comparison</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Options</th><th>Time</th><th>Tokens</th><th>Expected-source hits</th><th>Answer and sources</th></tr></thead>
+          <tbody id="benchmark-results"></tbody>
+        </table>
+      </div>
     </section>
     <section id="answer-panel" aria-labelledby="answer-title" hidden>
       <h2 id="answer-title">Answer</h2>
@@ -132,6 +172,14 @@
     const answer = document.querySelector("#answer");
     const mode = document.querySelector("#mode");
     const reasoningEffortInput = document.querySelector("#reasoning-effort");
+    const activity = document.querySelector("#activity");
+    const runButton = document.querySelector("#submit");
+    const benchmarkButton = document.querySelector("#benchmark");
+    const summaryPanel = document.querySelector("#summary-panel");
+    const summaryMetrics = document.querySelector("#summary-metrics");
+    const summaryNote = document.querySelector("#summary-note");
+    const benchmarkPanel = document.querySelector("#benchmark-panel");
+    const benchmarkResults = document.querySelector("#benchmark-results");
 
     function updateReasoningEffortState() {
       reasoningEffortInput.disabled = mode.value === "retrieve";
@@ -139,6 +187,139 @@
 
     mode.addEventListener("change", updateReasoningEffortState);
     updateReasoningEffortState();
+
+    function setActivity(text) {
+      activity.textContent = text;
+      activity.hidden = !text;
+      document.querySelector("main").setAttribute("aria-busy", String(Boolean(text)));
+    }
+
+    function setControlsDisabled(disabled) {
+      runButton.disabled = disabled;
+      benchmarkButton.disabled = disabled;
+    }
+
+    function readInputs() {
+      const token = document.querySelector("#token").value.trim();
+      const query = document.querySelector("#query").value.trim();
+      const tenant = document.querySelector("#tenant").value.trim();
+      const topK = Number(document.querySelector("#top-k").value);
+      const expectedDocuments = document.querySelector("#expected-documents").value
+        .split(",").map(value => value.trim()).filter(Boolean);
+      const reasoningEffort = reasoningEffortInput.value.trim();
+      if (!token) throw new Error("Enter a gateway bearer token.");
+      if (!query) throw new Error("Enter a question.");
+      if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
+      if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Sources to retrieve must be between 1 and 50.");
+      return { token, query, tenant, topK, expectedDocuments, reasoningEffort };
+    }
+
+    async function sendRequest(path, payload, token, tenant) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: {
+          "Authorization": ["Bearer", token].join(" "),
+          "X-Tenant-ID": tenant,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("Authentication failed. Enter the raw key value without quotes or a “Bearer ” prefix.");
+        if (response.status === 403) throw new Error("This key is not authorized for the selected tenant.");
+        throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`);
+      }
+      return data;
+    }
+
+    function tokenSummary(data) {
+      const usage = data.usage || {};
+      const prompt = usage.prompt_tokens ?? usage.prompt_eval_count;
+      const completion = usage.completion_tokens ?? usage.eval_count;
+      const total = usage.total_tokens ?? (
+        Number.isFinite(prompt) && Number.isFinite(completion) ? prompt + completion : undefined
+      );
+      if (total === undefined) return "Not reported";
+      return `${total} total${prompt === undefined ? "" : ` · ${prompt} prompt`}${completion === undefined ? "" : ` · ${completion} completion`}`;
+    }
+
+    function sourceHitSummary(sources, expectedDocuments) {
+      if (!expectedDocuments.length) return "Not measured";
+      const found = new Set(sources.map(source => source.document_id));
+      const hits = expectedDocuments.filter(documentId => found.has(documentId)).length;
+      return `${hits}/${expectedDocuments.length} (${Math.round(hits / expectedDocuments.length * 100)}%)`;
+    }
+
+    function metric(label, value) {
+      const card = document.createElement("div");
+      card.className = "metric";
+      const strong = document.createElement("strong");
+      const caption = document.createElement("span");
+      strong.textContent = value;
+      caption.textContent = label;
+      card.append(strong, caption);
+      return card;
+    }
+
+    function renderSummary(data, sources, elapsedMs, expectedDocuments) {
+      summaryMetrics.replaceChildren(
+        metric("Elapsed", `${elapsedMs.toFixed(0)} ms`),
+        metric("Token usage", tokenSummary(data)),
+        metric("Retrieved chunks", String(sources.length)),
+        metric("Expected-source hits", sourceHitSummary(sources, expectedDocuments))
+      );
+      summaryNote.textContent = expectedDocuments.length
+        ? "Source hit rate compares retrieved document IDs with the expected IDs you entered; it does not grade the generated answer."
+        : "Source accuracy was not measured because no expected document IDs were provided."
+      summaryPanel.hidden = false;
+    }
+
+    function renderBenchmark(results, expectedDocuments) {
+      benchmarkResults.replaceChildren();
+      for (const result of results) {
+        const row = benchmarkResults.insertRow();
+        const options = row.insertCell();
+        const reasoning = result.reasoningEnabled
+          ? `on (${result.reasoningEffort})`
+          : "off";
+        options.textContent = `Rerank ${result.rerankEnabled ? "on" : "off"} · Hybrid ${result.hybridEnabled ? "on" : "off"} · Reasoning ${reasoning}`;
+        row.insertCell().textContent = result.error ? "-" : `${result.elapsedMs.toFixed(0)} ms`;
+        row.insertCell().textContent = result.error ? "-" : tokenSummary(result.data);
+        row.insertCell().textContent = result.error
+          ? "-"
+          : sourceHitSummary(result.sources, expectedDocuments);
+        const detailCell = row.insertCell();
+        detailCell.className = "result-detail";
+        if (result.error) {
+          detailCell.classList.add("failed");
+          detailCell.textContent = result.error;
+          continue;
+        }
+        const disclosure = document.createElement("details");
+        const summary = document.createElement("summary");
+        const content = document.createElement("p");
+        const sourceList = document.createElement("p");
+        summary.textContent = "Inspect answer and sources";
+        content.textContent = result.data.choices?.[0]?.message?.content || "The model returned an empty answer.";
+        sourceList.textContent = `Sources: ${result.sources.map(source => source.document_id).join(", ") || "None"}`;
+        disclosure.append(summary, content, sourceList);
+        detailCell.append(disclosure);
+      }
+    }
+
+    function chatPayload(inputs, rerankEnabled, hybridEnabled, reasoningEffort = inputs.reasoningEffort) {
+      const payload = {
+        model: "rag-local",
+        messages: [{ role: "user", content: inputs.query }],
+        stream: false,
+        top_k: inputs.topK,
+        rerank_enabled: rerankEnabled,
+        hybrid_enabled: hybridEnabled
+      };
+      if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
+      return payload;
+    }
 
     function renderSources(items, includeText) {
       sources.replaceChildren();
@@ -172,69 +353,120 @@
       }
     }
 
-    document.querySelector("#submit").addEventListener("click", async event => {
+    runButton.addEventListener("click", async () => {
       message.textContent = "";
-      const button = event.currentTarget;
-      button.disabled = true;
+      setControlsDisabled(true);
       answerPanel.hidden = true;
       answer.textContent = "";
       sources.replaceChildren();
+      summaryPanel.hidden = true;
+      benchmarkPanel.hidden = true;
       try {
-        const token = document.querySelector("#token").value.trim();
-        const query = document.querySelector("#query").value.trim();
-        const tenant = document.querySelector("#tenant").value.trim();
-        const topK = Number(document.querySelector("#top-k").value);
+        const inputs = readInputs();
         const rerankEnabled = document.querySelector("#rerank-enabled").checked;
         const hybridEnabled = document.querySelector("#hybrid-enabled").checked;
-        const reasoningEffort = reasoningEffortInput.value.trim();
-        if (!token) throw new Error("Enter a gateway bearer token.");
-        if (!query) throw new Error("Enter a question.");
-        if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
-        if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Sources to retrieve must be between 1 and 50.");
-
         const selectedMode = mode.value;
-        const chatBody = {
-          model: "rag-local",
-          messages: [{ role: "user", content: query }],
-          stream: false,
-          top_k: topK,
-          rerank_enabled: rerankEnabled,
-          hybrid_enabled: hybridEnabled
-        };
-        if (reasoningEffort) chatBody.reasoning_effort = reasoningEffort;
-        const response = await fetch(selectedMode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": ["Bearer", token].join(" "),
-            "X-Tenant-ID": tenant,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(selectedMode === "retrieve"
-            ? { query, top_k: topK, rerank_enabled: rerankEnabled, hybrid_enabled: hybridEnabled }
-            : chatBody)
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          if (response.status === 401) throw new Error("Authentication failed. Enter the raw key value without quotes or a “Bearer ” prefix.");
-          if (response.status === 403) throw new Error("This key is not authorized for the selected tenant.");
-          throw new Error(typeof data.detail === "string" ? data.detail : `Request failed (${response.status}).`);
-        }
-
-        if (mode === "retrieve") {
-          renderSources(data.data || [], true);
+        setActivity(selectedMode === "retrieve"
+          ? "Retrieving matching sources..."
+          : "Retrieving context and waiting for Ollama...");
+        const startedAt = performance.now();
+        const data = await sendRequest(
+          selectedMode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions",
+          selectedMode === "retrieve"
+            ? {
+                query: inputs.query,
+                top_k: inputs.topK,
+                rerank_enabled: rerankEnabled,
+                hybrid_enabled: hybridEnabled
+              }
+            : chatPayload(inputs, rerankEnabled, hybridEnabled),
+          inputs.token,
+          inputs.tenant
+        );
+        const elapsedMs = performance.now() - startedAt;
+        const retrievedSources = selectedMode === "retrieve" ? data.data || [] : data.sources || [];
+        if (selectedMode === "retrieve") {
+          renderSources(retrievedSources, true);
         } else {
           const choice = data.choices?.[0];
           answer.textContent = choice?.message?.content || "The model returned an empty answer.";
           answerPanel.hidden = false;
-          renderSources(data.sources || [], false);
+          renderSources(retrievedSources, false);
         }
+        renderSummary(data, retrievedSources, elapsedMs, inputs.expectedDocuments);
         message.style.color = "#176f5b";
         message.textContent = selectedMode === "retrieve" ? "Retrieval complete." : "RAG answer complete.";
       } catch (error) {
         message.style.color = "#a63d35";
         message.textContent = error.message;
       } finally {
-        button.disabled = false;
+        setActivity("");
+        setControlsDisabled(false);
+      }
+    });
+
+    benchmarkButton.addEventListener("click", async () => {
+      message.textContent = "";
+      setControlsDisabled(true);
+      answerPanel.hidden = true;
+      summaryPanel.hidden = true;
+      benchmarkPanel.hidden = false;
+      benchmarkResults.replaceChildren();
+      try {
+        const inputs = readInputs();
+        mode.value = "chat";
+        updateReasoningEffortState();
+        const reasoningOnEffort = inputs.reasoningEffort.toLowerCase() === "none"
+          ? "high"
+          : inputs.reasoningEffort || "high";
+        const reasoningLevels = [
+          { reasoningEnabled: false, reasoningEffort: "none" },
+          { reasoningEnabled: true, reasoningEffort: reasoningOnEffort }
+        ];
+        const combinations = [];
+        for (const reasoning of reasoningLevels) {
+          for (const rerankEnabled of [false, true]) {
+            for (const hybridEnabled of [false, true]) {
+              combinations.push({ ...reasoning, rerankEnabled, hybridEnabled });
+            }
+          }
+        }
+        const results = [];
+        for (const [index, combination] of combinations.entries()) {
+          const label = `Rerank ${combination.rerankEnabled ? "on" : "off"}, hybrid ${combination.hybridEnabled ? "on" : "off"}, reasoning ${combination.reasoningEnabled ? `on (${combination.reasoningEffort})` : "off"}`;
+          setActivity(`Benchmark ${index + 1} of ${combinations.length}: ${label}...`);
+          const startedAt = performance.now();
+          try {
+            const data = await sendRequest(
+              "/v1/chat/completions",
+              chatPayload(
+                inputs,
+                combination.rerankEnabled,
+                combination.hybridEnabled,
+                combination.reasoningEffort
+              ),
+              inputs.token,
+              inputs.tenant
+            );
+            results.push({
+              ...combination,
+              data,
+              sources: data.sources || [],
+              elapsedMs: performance.now() - startedAt
+            });
+          } catch (error) {
+            results.push({ ...combination, error: error.message });
+          }
+          renderBenchmark(results, inputs.expectedDocuments);
+        }
+        message.style.color = "#176f5b";
+        message.textContent = "Benchmark complete. Compare each answer, elapsed time, token use, and expected-source hits.";
+      } catch (error) {
+        message.style.color = "#a63d35";
+        message.textContent = error.message;
+      } finally {
+        setActivity("");
+        setControlsDisabled(false);
       }
     });
   </script>
