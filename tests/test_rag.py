@@ -697,7 +697,7 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
         gateway_api_key="evaluation-admin-key",
         api_key_registry={sha256(token.encode()).hexdigest(): ["tenant-a"]},
     )
-    searches: list[tuple[str, int]] = []
+    searches: list[tuple[str, int, bool | None, bool | None]] = []
 
     class FakeStore:
         def search(
@@ -706,8 +706,10 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
             vector: list[float],
             limit: int,
             query: str | None = None,
+            rerank_enabled: bool | None = None,
+            hybrid_enabled: bool | None = None,
         ) -> list[dict[str, Any]]:
-            searches.append((tenant_id, limit))
+            searches.append((tenant_id, limit, rerank_enabled, hybrid_enabled))
             if vector == [1.0]:
                 return [
                     {"document_id": "doc-a", "chunk_index": 0, "score": 0.9, "metadata": {}},
@@ -748,6 +750,8 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
                 json={
                     "tenant_id": "tenant-a",
                     "top_k": 2,
+                    "rerank_enabled": True,
+                    "hybrid_enabled": True,
                     "cases": [
                         {
                             "query": "first question",
@@ -761,6 +765,27 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
                 },
             )
             run_id = response.json().get("run_id")
+            comparison_run_response = client.post(
+                "/v1/evaluations/retrieval",
+                headers=headers,
+                json={
+                    "tenant_id": "tenant-a",
+                    "top_k": 2,
+                    "rerank_enabled": False,
+                    "hybrid_enabled": False,
+                    "cases": [
+                        {
+                            "query": "first question",
+                            "expected_document_ids": ["doc-a", "doc-b"],
+                        },
+                        {
+                            "query": "second question",
+                            "expected_document_ids": ["doc-b"],
+                        },
+                    ],
+                },
+            )
+            comparison_run_id = comparison_run_response.json().get("run_id")
             saved_runs = client.get(
                 "/v1/evaluations/retrieval?tenant_id=tenant-a",
                 headers=headers,
@@ -770,7 +795,7 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
                 headers=headers,
             )
             comparison = client.get(
-                f"/v1/evaluations/retrieval/{run_id}/compare/{run_id}",
+                f"/v1/evaluations/retrieval/{comparison_run_id}/compare/{run_id}",
                 headers=headers,
             )
             denied = client.post(
@@ -792,25 +817,46 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
 
         assert page.status_code == 200
         assert "Retrieval evaluation" in page.text
+        assert 'id="rerank-enabled" type="checkbox"' in page.text
+        assert 'id="hybrid-enabled" type="checkbox"' in page.text
         assert response.status_code == 200
         result = response.json()
         assert run_id
+        assert comparison_run_id
+        assert comparison_run_response.status_code == 200
         assert saved_runs.status_code == 200
-        assert saved_runs.json()["runs"][0]["run_id"] == run_id
+        assert saved_runs.json()["runs"][0]["run_id"] == comparison_run_id
+        assert saved_runs.json()["runs"][0]["run_name"] == (
+            "tenant=tenant-a | rerank=off | hybrid=off"
+        )
+        assert saved_runs.json()["runs"][0]["rerank_enabled"] is False
+        assert saved_runs.json()["runs"][0]["hybrid_enabled"] is False
         assert "cases" not in saved_runs.json()["runs"][0]
         assert saved_run.status_code == 200
         assert saved_run.json()["run_id"] == run_id
+        assert saved_run.json()["run_name"] == "tenant=tenant-a | rerank=on | hybrid=on"
         assert comparison.status_code == 200
         assert comparison.json()["metrics"]["hit_rate_at_k"]["delta"] == 0
+        assert comparison.json()["run_name"] == "tenant=tenant-a | rerank=off | hybrid=off"
+        assert comparison.json()["baseline_run_name"] == "tenant=tenant-a | rerank=on | hybrid=on"
+        assert comparison.json()["rerank_enabled"] is False
+        assert comparison.json()["hybrid_enabled"] is False
         assert result["metrics"]["case_count"] == 2
         assert result["metrics"]["hit_rate_at_k"] == 1
         assert result["metrics"]["recall_at_k"] == pytest.approx(2 / 3)
         assert result["metrics"]["mean_reciprocal_rank"] == pytest.approx(0.75)
         assert result["cases"][1]["retrieved_document_ids"] == ["doc-c", "doc-b"]
-        assert searches == [("tenant-a", 2), ("tenant-a", 2), ("tenant-b", 5)]
+        assert searches == [
+            ("tenant-a", 2, True, True),
+            ("tenant-a", 2, True, True),
+            ("tenant-a", 2, False, False),
+            ("tenant-a", 2, False, False),
+            ("tenant-b", 5, False, False),
+        ]
         assert denied.status_code == 403
         assert admin_response.status_code == 200
         assert admin_response.json()["tenant_id"] == "tenant-b"
+        assert admin_response.json()["run_name"] == "tenant=tenant-b | rerank=off | hybrid=off"
     finally:
         app.dependency_overrides.pop(get_settings, None)
         app.dependency_overrides.pop(get_store, None)
@@ -829,8 +875,12 @@ def test_retrieval_evaluation_accepts_shared_gateway_api_key(
             vector: list[float],
             limit: int,
             query: str | None = None,
+            rerank_enabled: bool | None = None,
+            hybrid_enabled: bool | None = None,
         ) -> list[dict[str, Any]]:
             assert (tenant_id, vector, limit) == ("default", [0.1], 5)
+            assert rerank_enabled is False
+            assert hybrid_enabled is False
             return [{"document_id": "guide.md", "chunk_index": 0, "score": 0.9, "metadata": {}}]
 
     class FakeEmbedder:
@@ -910,6 +960,9 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                     "chunk_index": 1,
                     "text": "The example greenhouse opens at 08:00.",
                     "score": 0.91,
+                    "vector_score": 0.84,
+                    "lexical_score": 8.4,
+                    "rerank_score": 0.95,
                     "metadata": {"source": "guide.md"},
                 }
             ]
@@ -1007,11 +1060,18 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         assert "const reasoningOnEffort = inputs.reasoningEffort.toLowerCase()" in page.text
         assert "combinations.push({ ...reasoning, rerankEnabled, hybridEnabled })" in page.text
         assert "Reasoning ${reasoning}" in page.text
+        assert 'id="export-benchmark"' in page.text
+        assert "function sourceScoreSummary(" in page.text
+        assert "function benchmarkMarkdown(" in page.text
+        assert "Source scores | Answer" in page.text
         assert response.status_code == 200
         assert tenant_scope_response.status_code == 403
         assert invalid_top_k_response.status_code == 422
         assert response.json()["choices"][0]["message"]["content"] == "It opens at 08:00. [S1]"
         assert response.json()["sources"][0]["document_id"] == "guide.md"
+        assert response.json()["sources"][0]["vector_score"] == 0.84
+        assert response.json()["sources"][0]["lexical_score"] == 8.4
+        assert response.json()["sources"][0]["rerank_score"] == 0.95
         assert upstream_payloads[0]["reasoning_effort"] == "high"
         assert searches == [("tenant-b", 2, False, True)]
         assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]

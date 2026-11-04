@@ -28,6 +28,8 @@
     h2 { font-size: 17px; margin: 0 0 14px; }
     .field { display: grid; gap: 5px; margin-bottom: 14px; }
     label { color: #294549; font-size: 13px; font-weight: 650; }
+    .checkbox-field { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .checkbox-field input { width: 18px; min-height: 18px; margin: 0; }
     input, textarea { width: 100%; border: 1px solid #afc1ba; border-radius: 4px; background: #fff; color: var(--ink); padding: 9px 10px; font: inherit; }
     input { min-height: 40px; }
     textarea { min-height: 250px; resize: vertical; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -84,6 +86,14 @@
         <input id="token" type="password" autocomplete="off" required>
         <span class="note">Enter the actual GATEWAY_API_KEY secret value, not the text “GATEWAY_API_KEY”. Do not add the “Bearer ” prefix; the page adds it. Restart the gateway after changing its authentication configuration.</span>
       </div>
+      <label class="checkbox-field" for="rerank-enabled">
+        <input id="rerank-enabled" type="checkbox">
+        Enable Atlas Native Reranking
+      </label>
+      <label class="checkbox-field" for="hybrid-enabled">
+        <input id="hybrid-enabled" type="checkbox">
+        Enable hybrid vector + text search
+      </label>
       <div class="field">
         <label for="cases">Cases (JSON array)</label>
         <textarea id="cases" spellcheck="false" aria-describedby="cases-note"></textarea>
@@ -112,7 +122,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Run</th><th>Tenant</th><th>Top K</th><th>Hit rate</th><th>Recall</th><th>MRR</th><th>Latency</th><th></th></tr></thead>
+          <thead><tr><th>Run name</th><th>Tenant</th><th>Top K</th><th>Rerank</th><th>Hybrid</th><th>Hit rate</th><th>Recall</th><th>MRR</th><th>Latency</th><th></th></tr></thead>
           <tbody id="saved-runs"><tr><td colspan="8" class="note">Enter a bearer token and refresh to load saved runs.</td></tr></tbody>
         </table>
       </div>
@@ -137,9 +147,9 @@
   </main>
   <script>
     const exampleCases = [
-      { query: "How long are audit events retained?", expected_document_ids: ["retention-policy.md"] },
-      { query: "What crops grow in the south bed?", expected_document_ids: ["watering-notes.docx", "greenhouse-harvest.xlsx"] },
-      { query: "When is support available?", expected_document_ids: ["service-handbook.md"] }
+      { query: "How long are audit events retained?", expected_document_ids: ["sample-docs/retention-policy.md"] },
+      { query: "What crops grow in the south bed?", expected_document_ids: ["sample-docs/watering-notes.docx", "sample-docs/greenhouse-harvest.xlsx"] },
+      { query: "When is support available?", expected_document_ids: ["sample-docs/service-handbook.md"] }
     ];
     const casesInput = document.querySelector("#cases");
     const message = document.querySelector("#message");
@@ -172,6 +182,8 @@
       const values = data.metrics;
       metrics.replaceChildren(
         metricCard("Cases", String(values.case_count)),
+        metricCard("Reranking", optionLabel(data.rerank_enabled)),
+        metricCard("Hybrid search", optionLabel(data.hybrid_enabled)),
         metricCard("Hit rate @ K", `${(values.hit_rate_at_k * 100).toFixed(1)}%`),
         metricCard("Recall @ K", `${(values.recall_at_k * 100).toFixed(1)}%`),
         metricCard("Mean reciprocal rank", values.mean_reciprocal_rank.toFixed(3)),
@@ -197,6 +209,10 @@
       }
     }
 
+    function optionLabel(enabled) {
+      return enabled === true ? "On" : enabled === false ? "Off" : "Unknown";
+    }
+
     function authHeaders() {
       const token = document.querySelector("#token").value.trim();
       if (!token) throw new Error("Enter a gateway bearer token.");
@@ -218,15 +234,17 @@
       baselineSelect.replaceChildren(new Option("Select a baseline run", ""));
       for (const run of data.runs) {
         const option = new Option(
-          `${new Date(run.created_at).toLocaleString()} · ${run.metrics.hit_rate_at_k.toFixed(2)} hit rate`,
+          `${new Date(run.created_at).toLocaleString()} · ${run.run_name}`,
           run.run_id
         );
         baselineSelect.add(option);
         const row = document.createElement("tr");
         const values = [
-          new Date(run.created_at).toLocaleString(),
+          run.run_name,
           run.tenant_id,
           String(run.top_k),
+          optionLabel(run.rerank_enabled),
+          optionLabel(run.hybrid_enabled),
           `${(run.metrics.hit_rate_at_k * 100).toFixed(1)}%`,
           `${(run.metrics.recall_at_k * 100).toFixed(1)}%`,
           run.metrics.mean_reciprocal_rank.toFixed(3),
@@ -258,7 +276,7 @@
       if (!data.runs.length) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 8;
+        cell.colSpan = 10;
         cell.className = "note";
         cell.textContent = "No saved runs for this tenant.";
         row.append(cell);
@@ -296,7 +314,7 @@
           `/v1/evaluations/retrieval/${encodeURIComponent(latest.run_id)}/compare/${encodeURIComponent(selectedBaseline)}`
         );
         const title = document.createElement("strong");
-        title.textContent = `Latest run vs baseline (${selectedBaseline.slice(0, 8)}): `;
+        title.textContent = `${result.run_name} vs baseline ${result.baseline_run_name}: `;
         const summary = Object.entries(result.metrics).map(([name, values]) =>
           `${name.replaceAll("_", " ")} ${values.delta >= 0 ? "+" : ""}${values.delta.toFixed(3)}`
         ).join(" · ");
@@ -331,6 +349,8 @@
           body: JSON.stringify({
             tenant_id: document.querySelector("#tenant").value.trim(),
             top_k: Number(document.querySelector("#top-k").value),
+            rerank_enabled: document.querySelector("#rerank-enabled").checked,
+            hybrid_enabled: document.querySelector("#hybrid-enabled").checked,
             cases
           })
         });
@@ -341,7 +361,7 @@
         }
         renderResults(data);
         message.style.color = "#176f5b";
-        message.textContent = `Evaluation saved as ${data.run_id}. Metrics use exact document ID matches.`;
+        message.textContent = `Saved ${data.run_name}. Metrics use exact document ID matches.`;
         try {
           await refreshSavedRuns();
         } catch (error) {

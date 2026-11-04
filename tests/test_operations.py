@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,6 +57,8 @@ def test_operations_store_persists_and_scopes_evaluation_runs(tmp_path: Path) ->
     evaluation = {
         "tenant_id": "tenant-a",
         "top_k": 5,
+        "rerank_enabled": True,
+        "hybrid_enabled": False,
         "metrics": {
             "case_count": 1,
             "hit_rate_at_k": 1.0,
@@ -78,12 +82,73 @@ def test_operations_store_persists_and_scopes_evaluation_runs(tmp_path: Path) ->
     assert restored["run_id"] == run_id
     assert restored["created_at"]
     assert restored["dataset_id"]
+    assert restored["rerank_enabled"] is True
+    assert restored["hybrid_enabled"] is False
+    assert restored["run_name"] == "tenant=tenant-a | rerank=on | hybrid=off"
     assert restored["cases"] == evaluation["cases"]
     assert store.get_evaluation(run_id, ["tenant-b"]) is None
     assert store.list_evaluations(["tenant-b"]) == []
     summary = store.list_evaluations(["tenant-a"])[0]
     assert summary["case_count"] == 1
+    assert summary["rerank_enabled"] is True
+    assert summary["hybrid_enabled"] is False
+    assert summary["run_name"] == "tenant=tenant-a | rerank=on | hybrid=off"
     assert "cases" not in summary
+
+
+def test_operations_store_migrates_legacy_evaluation_runs(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-operations.sqlite3"
+    evaluation = {
+        "tenant_id": "tenant-old",
+        "top_k": 5,
+        "metrics": {},
+        "cases": [{"query": "legacy", "expected_document_ids": ["doc-old"]}],
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE retrieval_evaluations (
+                run_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                top_k INTEGER NOT NULL,
+                result_json TEXT NOT NULL,
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                case_count INTEGER NOT NULL DEFAULT 0,
+                dataset_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO retrieval_evaluations
+                (run_id, tenant_id, top_k, result_json, metrics_json, case_count,
+                 dataset_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-run",
+                "tenant-old",
+                5,
+                json.dumps(evaluation),
+                "{}",
+                1,
+                "",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    store = OperationsStore(database)
+    summary = store.list_evaluations(tenant_id="tenant-old")[0]
+    restored = store.get_evaluation("legacy-run")
+
+    assert summary["rerank_enabled"] is None
+    assert summary["hybrid_enabled"] is None
+    assert summary["run_name"] == "tenant=tenant-old | rerank=unknown | hybrid=unknown"
+    assert restored is not None
+    assert restored["rerank_enabled"] is None
+    assert restored["hybrid_enabled"] is None
+    assert restored["run_name"] == summary["run_name"]
 
 
 def test_observability_middleware_adds_request_id_and_exports_metrics() -> None:

@@ -36,6 +36,9 @@ class OperationsStore:
                     metrics_json TEXT NOT NULL DEFAULT '{}',
                     case_count INTEGER NOT NULL DEFAULT 0,
                     dataset_hash TEXT NOT NULL DEFAULT '',
+                    rerank_enabled INTEGER,
+                    hybrid_enabled INTEGER,
+                    run_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 )
                 """
@@ -58,6 +61,19 @@ class OperationsStore:
                 connection.execute(
                     "ALTER TABLE retrieval_evaluations "
                     "ADD COLUMN dataset_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "rerank_enabled" not in evaluation_columns:
+                connection.execute(
+                    "ALTER TABLE retrieval_evaluations ADD COLUMN rerank_enabled INTEGER"
+                )
+            if "hybrid_enabled" not in evaluation_columns:
+                connection.execute(
+                    "ALTER TABLE retrieval_evaluations ADD COLUMN hybrid_enabled INTEGER"
+                )
+            if "run_name" not in evaluation_columns:
+                connection.execute(
+                    "ALTER TABLE retrieval_evaluations "
+                    "ADD COLUMN run_name TEXT NOT NULL DEFAULT ''"
                 )
             evaluations_missing_hash = connection.execute(
                 "SELECT run_id, result_json FROM retrieval_evaluations WHERE dataset_hash = ''"
@@ -217,19 +233,27 @@ class OperationsStore:
         run_id = uuid4().hex
         created_at = _now()
         dataset_hash = _evaluation_dataset_hash(result)
+        rerank_enabled = result.get("rerank_enabled")
+        hybrid_enabled = result.get("hybrid_enabled")
+        run_name = result.get("run_name") or _evaluation_run_name(
+            result["tenant_id"], rerank_enabled, hybrid_enabled
+        )
         saved = {
             **result,
             "run_id": run_id,
             "created_at": created_at,
             "dataset_id": dataset_hash,
+            "rerank_enabled": rerank_enabled,
+            "hybrid_enabled": hybrid_enabled,
+            "run_name": run_name,
         }
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO retrieval_evaluations
                     (run_id, tenant_id, top_k, result_json, metrics_json, case_count,
-                     dataset_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     dataset_hash, rerank_enabled, hybrid_enabled, run_name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -239,6 +263,9 @@ class OperationsStore:
                     json.dumps(result["metrics"], separators=(",", ":")),
                     len(result["cases"]),
                     dataset_hash,
+                    None if rerank_enabled is None else int(rerank_enabled),
+                    None if hybrid_enabled is None else int(hybrid_enabled),
+                    run_name,
                     created_at,
                 ),
             )
@@ -264,7 +291,8 @@ class OperationsStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT run_id, tenant_id, top_k, metrics_json, case_count, dataset_hash, created_at "
+                "SELECT run_id, tenant_id, top_k, metrics_json, case_count, dataset_hash, "
+                "rerank_enabled, hybrid_enabled, run_name, created_at "
                 "FROM retrieval_evaluations "
                 f"{where} ORDER BY created_at DESC LIMIT ?",
                 (*parameters, limit),
@@ -277,6 +305,15 @@ class OperationsStore:
                 "metrics": json.loads(row["metrics_json"]),
                 "case_count": row["case_count"],
                 "dataset_id": row["dataset_hash"],
+                "rerank_enabled": (
+                    bool(row["rerank_enabled"]) if row["rerank_enabled"] is not None else None
+                ),
+                "hybrid_enabled": (
+                    bool(row["hybrid_enabled"]) if row["hybrid_enabled"] is not None else None
+                ),
+                "run_name": row["run_name"] or _evaluation_run_name(
+                    row["tenant_id"], row["rerank_enabled"], row["hybrid_enabled"]
+                ),
                 "created_at": row["created_at"],
             }
             for row in rows
@@ -298,11 +335,29 @@ class OperationsStore:
         result = json.loads(row["result_json"])
         if "dataset_id" not in result:
             result["dataset_id"] = row["dataset_hash"] or _evaluation_dataset_hash(result)
+        result.setdefault("rerank_enabled", None)
+        result.setdefault("hybrid_enabled", None)
+        result.setdefault(
+            "run_name",
+            _evaluation_run_name(
+                result["tenant_id"], result["rerank_enabled"], result["hybrid_enabled"]
+            ),
+        )
         return result
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _evaluation_run_name(
+    tenant_id: str,
+    rerank_enabled: bool | None,
+    hybrid_enabled: bool | None,
+) -> str:
+    rerank = "unknown" if rerank_enabled is None else "on" if rerank_enabled else "off"
+    hybrid = "unknown" if hybrid_enabled is None else "on" if hybrid_enabled else "off"
+    return f"tenant={tenant_id} | rerank={rerank} | hybrid={hybrid}"
 
 
 def _evaluation_dataset_hash(result: dict[str, Any]) -> str:

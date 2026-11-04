@@ -1566,6 +1566,20 @@ async def evaluate_retrieval(
     embedder: VoyageEmbedder = Depends(get_embedder),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id(body.tenant_id, settings, allowed_tenants)
+    rerank_enabled = (
+        settings.retrieval_rerank_enabled
+        if body.rerank_enabled is None
+        else body.rerank_enabled
+    )
+    hybrid_enabled = (
+        settings.retrieval_hybrid_enabled
+        if body.hybrid_enabled is None
+        else body.hybrid_enabled
+    )
+    run_name = (
+        f"tenant={tenant_id} | rerank={'on' if rerank_enabled else 'off'} "
+        f"| hybrid={'on' if hybrid_enabled else 'off'}"
+    )
     cases = []
     cases_with_hits = 0
     matched_relevant_documents = 0
@@ -1581,18 +1595,14 @@ async def evaluate_retrieval(
         started_at = asyncio.get_running_loop().time()
         try:
             vector = (await embedder.embed([query], input_type="query"))[0]
-            search_options = (
-                {"hybrid_enabled": body.hybrid_enabled}
-                if body.hybrid_enabled is not None
-                else {}
-            )
             sources = await run_in_threadpool(
                 store.search,
                 tenant_id,
                 vector,
                 body.top_k,
                 query=query,
-                **search_options,
+                rerank_enabled=rerank_enabled,
+                hybrid_enabled=hybrid_enabled,
             )
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(
@@ -1631,6 +1641,9 @@ async def evaluate_retrieval(
     result = {
         "tenant_id": tenant_id,
         "top_k": body.top_k,
+        "rerank_enabled": rerank_enabled,
+        "hybrid_enabled": hybrid_enabled,
+        "run_name": run_name,
         "metrics": {
             "case_count": case_count,
             "hit_rate_at_k": cases_with_hits / case_count,
@@ -1716,6 +1729,12 @@ async def compare_retrieval_evaluations(
         "run_id": run_id,
         "baseline_id": baseline_id,
         "tenant_id": current["tenant_id"],
+        "run_name": current["run_name"],
+        "rerank_enabled": current["rerank_enabled"],
+        "hybrid_enabled": current["hybrid_enabled"],
+        "baseline_run_name": baseline["run_name"],
+        "baseline_rerank_enabled": baseline["rerank_enabled"],
+        "baseline_hybrid_enabled": baseline["hybrid_enabled"],
         "metrics": {
             key: {
                 "current": current_metrics[key],
@@ -1913,6 +1932,9 @@ async def chat_completions(
             "document_id": source["document_id"],
             "chunk_index": source["chunk_index"],
             "score": source.get("score"),
+            "vector_score": source.get("vector_score"),
+            "lexical_score": source.get("lexical_score"),
+            "rerank_score": source.get("rerank_score"),
             "metadata": source.get("metadata", {}),
         }
         for index, source in enumerate(sources, start=1)

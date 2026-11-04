@@ -103,4 +103,5 @@ class RetrievalEvaluationRequest(BaseModel):
     tenant_id: str = Field(default="default", min_length=1, max_length=256)
     cases: list[RetrievalEvaluationCase] = Field(min_length=1, max_length=100)
     top_k: int = Field(default=5, ge=1, le=50)
+    rerank_enabled: bool | None = None
     hybrid_enabled: bool | None = None

@@ -132,7 +132,7 @@
       </div>
       <div class="buttons">
         <button id="submit" type="button">Run</button>
-        <button id="benchmark" class="secondary" type="button">Benchmark all 4 combinations</button>
+        <button id="benchmark" class="secondary" type="button">Benchmark all 8 combinations</button>
       </div>
       <p class="note">Benchmark runs the same chat question across all eight reranking, hybrid-search, and reasoning on/off combinations. Expected document IDs measure source hit rate, not answer correctness.</p>
       <p id="activity" class="activity" role="status" aria-live="polite" hidden></p>
@@ -146,9 +146,12 @@
     </section>
     <section id="benchmark-panel" aria-labelledby="benchmark-title" hidden>
       <h2 id="benchmark-title">Option comparison</h2>
+      <div class="buttons">
+        <button id="export-benchmark" class="secondary" type="button" disabled>Export to clipboard</button>
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Options</th><th>Time</th><th>Tokens</th><th>Expected-source hits</th><th>Answer and sources</th></tr></thead>
+          <thead><tr><th>Options</th><th>Time</th><th>Tokens</th><th>Expected-source hits</th><th>Source scores</th><th>Answer and sources</th></tr></thead>
           <tbody id="benchmark-results"></tbody>
         </table>
       </div>
@@ -175,11 +178,14 @@
     const activity = document.querySelector("#activity");
     const runButton = document.querySelector("#submit");
     const benchmarkButton = document.querySelector("#benchmark");
+    const exportBenchmarkButton = document.querySelector("#export-benchmark");
     const summaryPanel = document.querySelector("#summary-panel");
     const summaryMetrics = document.querySelector("#summary-metrics");
     const summaryNote = document.querySelector("#summary-note");
     const benchmarkPanel = document.querySelector("#benchmark-panel");
     const benchmarkResults = document.querySelector("#benchmark-results");
+    let lastBenchmarkResults = [];
+    let lastBenchmarkContext = null;
 
     function updateReasoningEffortState() {
       reasoningEffortInput.disabled = mode.value === "retrieve";
@@ -251,6 +257,22 @@
       return `${hits}/${expectedDocuments.length} (${Math.round(hits / expectedDocuments.length * 100)}%)`;
     }
 
+    function formatScore(value) {
+      const score = Number(value);
+      return Number.isFinite(score) ? score.toFixed(3) : "-";
+    }
+
+    function sourceScoreSummary(sources, hybridEnabled) {
+      if (!sources.length) return "None";
+      return sources.map(source => {
+        const scores = [`${hybridEnabled ? "RRF" : "score"} ${formatScore(source.score)}`];
+        if (source.vector_score != null) scores.push(`vector ${formatScore(source.vector_score)}`);
+        if (source.lexical_score != null) scores.push(`lexical ${formatScore(source.lexical_score)}`);
+        if (source.rerank_score != null) scores.push(`rerank ${formatScore(source.rerank_score)}`);
+        return `${source.document_id}: ${scores.join(", ")}`;
+      }).join("\n");
+    }
+
     function metric(label, value) {
       const card = document.createElement("div");
       card.className = "metric";
@@ -289,6 +311,10 @@
         row.insertCell().textContent = result.error
           ? "-"
           : sourceHitSummary(result.sources, expectedDocuments);
+        const scoreCell = row.insertCell();
+        scoreCell.textContent = result.error
+          ? "-"
+          : sourceScoreSummary(result.sources, result.hybridEnabled);
         const detailCell = row.insertCell();
         detailCell.className = "result-detail";
         if (result.error) {
@@ -319,6 +345,45 @@
       };
       if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
       return payload;
+    }
+
+    function markdownCell(value) {
+      return String(value ?? "").replace(/\r?\n/g, "<br>").replace(/\|/g, "\\|");
+    }
+
+    function benchmarkMarkdown(results, context) {
+      const lines = [
+        `Question: ${markdownCell(context.query)}`,
+        `Tenant: ${markdownCell(context.tenant)}`,
+        `Expected document IDs: ${markdownCell(context.expectedDocuments.join(", ") || "Not provided")}`,
+        "",
+        "| Rerank | Hybrid | Reasoning | Time | Tokens | Expected-source hits | Source scores | Answer | Sources |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- |"
+      ];
+      for (const result of results) {
+        const reasoning = result.reasoningEnabled
+          ? `On (${result.reasoningEffort})`
+          : "Off";
+        if (result.error) {
+          lines.push(`| ${result.rerankEnabled ? "On" : "Off"} | ${result.hybridEnabled ? "On" : "Off"} | ${reasoning} | - | - | - | - | ${markdownCell(result.error)} | - |`);
+          continue;
+        }
+        const answerText = result.data.choices?.[0]?.message?.content || "The model returned an empty answer.";
+        const sourceNames = result.sources.map(source => source.document_id).join(", ") || "None";
+        const cells = [
+          result.rerankEnabled ? "On" : "Off",
+          result.hybridEnabled ? "On" : "Off",
+          reasoning,
+          `${result.elapsedMs.toFixed(0)} ms`,
+          tokenSummary(result.data),
+          sourceHitSummary(result.sources, context.expectedDocuments),
+          sourceScoreSummary(result.sources, result.hybridEnabled),
+          answerText,
+          sourceNames
+        ].map(markdownCell);
+        lines.push(`| ${cells.join(" | ")} |`);
+      }
+      return lines.join("\n");
     }
 
     function renderSources(items, includeText) {
@@ -408,10 +473,13 @@
     benchmarkButton.addEventListener("click", async () => {
       message.textContent = "";
       setControlsDisabled(true);
+      exportBenchmarkButton.disabled = true;
       answerPanel.hidden = true;
       summaryPanel.hidden = true;
       benchmarkPanel.hidden = false;
       benchmarkResults.replaceChildren();
+      lastBenchmarkResults = [];
+      lastBenchmarkContext = null;
       try {
         const inputs = readInputs();
         mode.value = "chat";
@@ -459,6 +527,9 @@
           }
           renderBenchmark(results, inputs.expectedDocuments);
         }
+        lastBenchmarkResults = results;
+        lastBenchmarkContext = inputs;
+        exportBenchmarkButton.disabled = results.length === 0;
         message.style.color = "#176f5b";
         message.textContent = "Benchmark complete. Compare each answer, elapsed time, token use, and expected-source hits.";
       } catch (error) {
@@ -467,6 +538,20 @@
       } finally {
         setActivity("");
         setControlsDisabled(false);
+      }
+    });
+
+    exportBenchmarkButton.addEventListener("click", async () => {
+      if (!lastBenchmarkContext || !lastBenchmarkResults.length) return;
+      try {
+        await navigator.clipboard.writeText(
+          benchmarkMarkdown(lastBenchmarkResults, lastBenchmarkContext)
+        );
+        message.style.color = "#176f5b";
+        message.textContent = "Benchmark table copied to clipboard.";
+      } catch {
+        message.style.color = "#a63d35";
+        message.textContent = "Clipboard access is unavailable in this browser context.";
       }
     });
   </script>
