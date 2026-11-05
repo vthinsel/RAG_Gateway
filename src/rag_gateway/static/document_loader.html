@@ -47,6 +47,7 @@
     input:focus, select:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
     .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .check { display: flex; align-items: center; gap: 9px; margin: 2px 0 16px; }
+    .check[hidden] { display: none; }
     .check input { width: 18px; min-height: 18px; accent-color: var(--green); }
     .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
     .drop-zone {
@@ -77,7 +78,7 @@
     .badge { background: var(--green-soft); color: #145b4a; padding: 3px 9px; border-radius: 3px; font-size: 12px; font-weight: 700; }
     .badge.error { background: #f8e4df; color: var(--red); }
     progress { width: 100%; height: 12px; margin: 16px 0 10px; accent-color: var(--green); }
-    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 6px 0 18px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 6px 0 18px; }
     .stat { border-left: 3px solid #8bb9a8; background: #f4f8f4; padding: 7px 9px; }
     .stat strong { display: block; font-size: 19px; line-height: 1.2; }
     .stat span { color: var(--muted); font-size: 11px; }
@@ -131,6 +132,10 @@
               <pre id="preview-text" hidden></pre>
             </div>
           </div>
+          <label class="check" id="sync-folder-field" hidden>
+            <input id="sync-folder" type="checkbox">
+            Remove indexed documents missing from this folder after a successful upload
+          </label>
           <div class="two">
             <div class="field">
               <label for="tenant">Tenant ID</label>
@@ -161,7 +166,7 @@
             <button type="submit" id="start-local">Scan gateway directory</button>
             <button type="button" id="start-upload">Upload selected files</button>
           </div>
-          <p class="note">Uploads support files up to 50 MiB each and 200 MiB total per job (maximum 500 files). Supported file types use the configured parser and OCR model; unsupported types are skipped. Extracted text is sent to the configured embedding service and Atlas.</p>
+          <p class="note">Uploads support files up to 50 MiB each and 200 MiB total per job (maximum 500 files). Unchanged files are skipped. Missing documents are removed only when syncing a selected folder after every eligible file succeeds; individual-file uploads and gateway scans never remove documents.</p>
           <p class="note">The gateway-directory option can only read paths listed in DOCUMENT_LOADER_ROOTS.</p>
           <p id="message" role="status" aria-live="polite"></p>
         </form>
@@ -177,6 +182,8 @@
           <div class="stat"><strong id="processed">0</strong><span>processed</span></div>
           <div class="stat"><strong id="succeeded">0</strong><span>succeeded</span></div>
           <div class="stat"><strong id="failed">0</strong><span>failed</span></div>
+          <div class="stat"><strong id="skipped">0</strong><span>skipped</span></div>
+          <div class="stat"><strong id="unchanged">0</strong><span>unchanged</span></div>
         </div>
         <div id="current">No active job</div>
         <ul id="events" aria-live="polite"></ul>
@@ -212,14 +219,26 @@
     const previewSummary = document.querySelector("#preview-summary");
     const previewText = document.querySelector("#preview-text");
     let selectedUploads = [];
+    let selectedFolderRoot = null;
     let activeJob = null;
 
     function extensions(value) {
       return value.split(",").map(item => item.trim()).filter(Boolean);
     }
 
-    function setSelectedUploads(files) {
+    function detectFolderRoot(files) {
+      if (!files.length) return null;
+      const pathParts = files.map(item => item.path.replace(/\\/g, "/").split("/"));
+      if (pathParts.some(parts => parts.length < 2)) return null;
+      const roots = new Set(pathParts.map(parts => parts[0]));
+      return roots.size === 1 ? pathParts[0][0] : null;
+    }
+
+    function setSelectedUploads(files, folderRoot = null) {
       selectedUploads = files;
+      selectedFolderRoot = folderRoot;
+      document.querySelector("#sync-folder-field").hidden = !folderRoot;
+      document.querySelector("#sync-folder").checked = false;
       const totalBytes = files.reduce((total, item) => total + item.file.size, 0);
       selectedFilesLabel.textContent = files.length
         ? `${files.length} file(s), ${(totalBytes / (1024 * 1024)).toFixed(1)} MiB selected: ${files.slice(0, 8).map(item => item.path).join(", ")}${files.length > 8 ? ", ..." : ""}`
@@ -241,10 +260,11 @@
       setSelectedUploads(Array.from(event.target.files, file => ({ file, path: file.name })));
     });
     document.querySelector("#directory-picker").addEventListener("change", event => {
-      setSelectedUploads(Array.from(event.target.files, file => ({
+      const files = Array.from(event.target.files, file => ({
         file,
         path: file.webkitRelativePath || file.name
-      })));
+      }));
+      setSelectedUploads(files, detectFolderRoot(files));
     });
 
     async function filesFromDrop(items) {
@@ -297,7 +317,8 @@
     }
     dropZone.addEventListener("drop", async event => {
       try {
-        setSelectedUploads(await filesFromDrop(event.dataTransfer.items));
+        const files = await filesFromDrop(event.dataTransfer.items);
+        setSelectedUploads(files, detectFolderRoot(files));
         if (!selectedUploads.length) throw new Error("No files found in the dropped items.");
         message.style.color = "#176f5b";
         message.textContent = "Dropped files are ready to upload.";
@@ -424,6 +445,7 @@
         body.append("model", modelSelect.value || "");
         body.append("include_extensions", document.querySelector("#include").value);
         body.append("exclude_extensions", document.querySelector("#exclude").value);
+        body.append("sync_folder", selectedFolderRoot && document.querySelector("#sync-folder").checked ? "true" : "false");
         const data = await api("/v1/document-loader/uploads", { method: "POST", body });
         activeJob = data.job_id;
         eventsList.replaceChildren();
@@ -441,7 +463,7 @@
         const job = await api(`/v1/document-loader/jobs/${activeJob}`);
         document.querySelector("#status").textContent = job.status.replaceAll("_", " ");
         document.querySelector("#status").classList.toggle("error", job.failed > 0);
-        for (const [id, key] of [["eligible", "eligible"], ["processed", "processed"], ["succeeded", "succeeded"], ["failed", "failed"]]) {
+        for (const [id, key] of [["eligible", "eligible"], ["processed", "processed"], ["succeeded", "succeeded"], ["failed", "failed"], ["skipped", "skipped"], ["unchanged", "unchanged"]]) {
           document.querySelector(`#${id}`).textContent = job[key] || 0;
         }
         const done = job.processed || 0;
@@ -465,7 +487,8 @@
           document.querySelector("#start-local").disabled = false;
           document.querySelector("#start-upload").disabled = false;
           message.style.color = job.failed ? "#a63d35" : "#176f5b";
-          message.textContent = `${job.succeeded || 0} succeeded, ${job.failed || 0} failed, ${job.skipped || 0} skipped.`;
+          const removed = job.deleted_missing_documents || 0;
+          message.textContent = `${job.succeeded || 0} succeeded, ${job.failed || 0} failed, ${job.skipped || 0} skipped (${job.unchanged || 0} unchanged)${removed ? `, ${removed} missing document(s) removed` : ""}.`;
           refreshJobHistory();
           return;
         }
@@ -493,7 +516,7 @@
             job.tenant_id,
             job.status.replaceAll("_", " "),
             `${job.processed || 0} / ${job.eligible || 0}`,
-            `${job.succeeded || 0} succeeded · ${job.failed || 0} failed · ${job.skipped || 0} skipped`
+            `${job.succeeded || 0} succeeded · ${job.failed || 0} failed · ${job.unchanged || 0} unchanged · ${job.skipped || 0} skipped · ${job.deleted_missing_documents || 0} removed`
           ]) {
             const cell = document.createElement("td");
             cell.textContent = value;

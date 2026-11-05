@@ -89,6 +89,7 @@ document with this shape:
   "embedding_dim": 1024,
   "chunk_policy": "char-v1:1200:150",
   "content_sha256": "<sha256 of this chunk text>",
+  "source_file_sha256": "<optional hash of original loader file bytes>",
   "updated_at": "<UTC timestamp>"
 }
 ```
@@ -101,10 +102,26 @@ new chunk count. A document that now produces no chunks removes its prior chunks
 Different tenants may use the same document ID without overwriting each other.
 
 `chunk_policy` records the chunking version and configured size/overlap, and
-`content_sha256` records the chunk text hash. These fields help identify what was
-stored; the gateway does not currently use them to perform incremental updates or
-automatically re-embed old documents. Changing the embedding model, dimensions, or
-chunking settings requires an intentional re-ingestion plan.
+`content_sha256` records the chunk text hash. For files loaded by the document
+loader, `source_file_sha256` records the original file bytes and is copied onto
+each chunk. Before parsing a loader file, the gateway compares this fingerprint
+with the stored first chunk and also checks the parser model, embedding model and
+dimensions, and chunk policy. If all match, extraction/OCR, embedding, and Atlas
+upserts are skipped. Direct API ingestions do not have a source-file fingerprint.
+Changing parsing, embedding, dimensions, or chunking settings causes the loader to
+process the file again.
+
+## Document-loader folder synchronization
+
+Folder deletion is an explicit browser-upload action, not normal ingestion
+behavior. When a selected browser folder has one clear top-level root, its upload
+form offers **Remove indexed documents missing from this folder**. If selected,
+the job considers only document IDs under that root and the selected tenant; after
+all eligible files parse and ingest successfully, it deletes IDs under the root
+that are absent from the uploaded manifest. An individual-file upload, a
+gateway-host directory scan, a retry, an unchecked folder upload, or any failed or
+cancelled job does not delete missing Atlas documents. The job reports unchanged,
+skipped, and removed counts in its result/history.
 
 At startup the gateway creates a regular MongoDB compound index on
 `(tenant_id, document_id)`, used by document-oriented operations. This is separate

@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
@@ -113,6 +114,61 @@ class AtlasStore:
             )
         )
 
+    def document_is_current(
+        self,
+        tenant_id: str,
+        document_id: str,
+        source_file_sha256: str,
+        parser_model: str,
+    ) -> bool:
+        document = self.collection.find_one(
+            {
+                "tenant_id": tenant_id,
+                "document_id": document_id,
+                "chunk_index": 0,
+            },
+            {
+                "_id": 0,
+                "source_file_sha256": 1,
+                "embedding_model": 1,
+                "embedding_dim": 1,
+                "chunk_policy": 1,
+                "metadata.parser_model": 1,
+            },
+        )
+        if document is None:
+            return False
+        return (
+            document.get("source_file_sha256") == source_file_sha256
+            and document.get("embedding_model") == self.settings.voyage_embedding_model
+            and document.get("embedding_dim") == self.settings.embedding_dimensions
+            and document.get("chunk_policy")
+            == f"char-v1:{self.settings.chunk_size}:{self.settings.chunk_overlap}"
+            and document.get("metadata", {}).get("parser_model") == parser_model
+        )
+
+    def delete_missing_folder_documents(
+        self,
+        tenant_id: str,
+        folder_root: str,
+        present_document_ids: Sequence[str],
+    ) -> int:
+        prefix = f"{folder_root}/"
+        present = set(present_document_ids)
+        existing = self.collection.distinct("document_id", {"tenant_id": tenant_id})
+        missing = [
+            document_id
+            for document_id in existing
+            if isinstance(document_id, str)
+            and document_id.startswith(prefix)
+            and document_id not in present
+        ]
+        if not missing:
+            return 0
+        return self.collection.delete_many(
+            {"tenant_id": tenant_id, "document_id": {"$in": missing}}
+        ).deleted_count
+
     def delete_tenant(self, tenant_id: str) -> int:
         return self.collection.delete_many({"tenant_id": tenant_id}).deleted_count
 
@@ -131,6 +187,7 @@ class AtlasStore:
         chunks: list[str],
         embeddings: list[list[float]],
         metadata: dict[str, Any],
+        source_file_sha256: str | None = None,
     ) -> int:
         if len(chunks) != len(embeddings):
             raise ValueError("Each chunk must have exactly one embedding")
@@ -152,6 +209,7 @@ class AtlasStore:
                     f"char-v1:{self.settings.chunk_size}:{self.settings.chunk_overlap}"
                 ),
                 "content_sha256": sha256(text.encode()).hexdigest(),
+                "source_file_sha256": source_file_sha256,
                 "updated_at": now,
             }
             operations.append(ReplaceOne({"_id": chunk_id}, document, upsert=True))

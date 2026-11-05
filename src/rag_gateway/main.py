@@ -957,6 +957,8 @@ async def _queue_document_loader_job(
     embedder: VoyageEmbedder,
     cleanup_directory: bool = False,
     file_paths: tuple[str, ...] | None = None,
+    folder_sync_root: str | None = None,
+    folder_manifest: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     tasks: set[asyncio.Task[Any]] = request.app.state.document_loader_tasks
     if sum(not task.done() for task in tasks) >= settings.document_loader_max_active_jobs:
@@ -998,9 +1000,12 @@ async def _queue_document_loader_job(
         "discovered": 0,
         "eligible": 0,
         "skipped": 0,
+        "unchanged": 0,
         "processed": 0,
         "succeeded": 0,
         "failed": 0,
+        "deleted_missing_documents": 0,
+        "folder_sync_root": folder_sync_root,
         "current_file": None,
         "files": [],
         "errors": [],
@@ -1019,17 +1024,34 @@ async def _queue_document_loader_job(
             chunks,
             embeddings,
             document.metadata,
+            document.source_file_sha256,
         )
         return {"chunks_upserted": count}
+
+    async def should_skip_unchanged(document_id: str, source_hash: str) -> bool:
+        current_check = getattr(store, "document_is_current", None)
+        if not callable(current_check):
+            return False
+        return await run_in_threadpool(
+            current_check,
+            tenant_id,
+            document_id,
+            source_hash,
+            parser.model,
+        )
 
     def update_progress(event: dict[str, Any]) -> None:
         job.update({key: value for key, value in event.items() if key != "message"})
         job["status"] = event["stage"]
         job["events"].append(event)
-        if event["stage"] in {"succeeded", "file_failed"}:
+        if event["stage"] in {"succeeded", "file_failed", "unchanged"}:
             outcome: dict[str, Any] = {
                 "file": event.get("current_file", ""),
-                "status": "succeeded" if event["stage"] == "succeeded" else "failed",
+                "status": {
+                    "succeeded": "succeeded",
+                    "file_failed": "failed",
+                    "unchanged": "unchanged",
+                }[event["stage"]],
             }
             if "chunks_upserted" in event:
                 outcome["chunks_upserted"] = event["chunks_upserted"]
@@ -1057,11 +1079,34 @@ async def _queue_document_loader_job(
                 ingest_parsed_document,
                 update_progress,
                 settings.max_document_chars,
+                should_skip_unchanged=should_skip_unchanged,
             )
             job.update(asdict(summary))
             job["directory"] = "browser upload" if cleanup_directory else str(directory)
             job["tenant_id"] = tenant_id
             job["model"] = parser.model
+            if folder_sync_root is not None:
+                if summary.status == "completed" and summary.failed == 0:
+                    deleted = await run_in_threadpool(
+                        store.delete_missing_folder_documents,
+                        tenant_id,
+                        folder_sync_root,
+                        folder_manifest or (),
+                    )
+                    job["deleted_missing_documents"] = deleted
+                    job["events"].append(
+                        {
+                            "stage": "folder_sync",
+                            "message": f"Removed {deleted} missing document(s) from folder {folder_sync_root}",
+                        }
+                    )
+                else:
+                    job["events"].append(
+                        {
+                            "stage": "folder_sync_skipped",
+                            "message": "Folder removals were not applied because ingestion did not complete successfully",
+                        }
+                    )
             job["events"] = job["events"][-250:]
         except asyncio.CancelledError:
             persisted_job = operations.get_job(job_id)
@@ -1146,6 +1191,7 @@ async def upload_document_loader_files(
     model: str = Form(default=""),
     include_extensions: str = Form(default=""),
     exclude_extensions: str = Form(default=""),
+    sync_folder: bool = Form(default=False),
     allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
     store: AtlasStore = Depends(get_store),
@@ -1233,6 +1279,18 @@ async def upload_document_loader_files(
         await asyncio.to_thread(shutil.rmtree, temporary_directory, True)
         raise
 
+    folder_sync_root: str | None = None
+    if sync_folder:
+        path_parts = [PurePosixPath(path).parts for path in seen_paths]
+        roots = {parts[0] for parts in path_parts if len(parts) >= 2}
+        if any(len(parts) < 2 for parts in path_parts) or len(roots) != 1:
+            await asyncio.to_thread(shutil.rmtree, temporary_directory, True)
+            raise HTTPException(
+                status_code=422,
+                detail="Folder synchronization requires every file to share one uploaded folder root",
+            )
+        folder_sync_root = next(iter(roots))
+
     try:
         return await _queue_document_loader_job(
             directory=temporary_directory,
@@ -1246,6 +1304,8 @@ async def upload_document_loader_files(
             store=store,
             embedder=embedder,
             cleanup_directory=True,
+            folder_sync_root=folder_sync_root,
+            folder_manifest=tuple(sorted(seen_paths)) if folder_sync_root is not None else None,
         )
     except BaseException:
         await asyncio.to_thread(shutil.rmtree, temporary_directory, True)

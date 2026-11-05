@@ -192,9 +192,12 @@ class OperationsStore:
             "discovered",
             "eligible",
             "skipped",
+            "unchanged",
             "processed",
             "succeeded",
             "failed",
+            "deleted_missing_documents",
+            "folder_sync_root",
             "retryable",
         )
         return [

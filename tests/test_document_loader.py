@@ -211,7 +211,7 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
         gateway_api_key="test-key",
         document_loader_enabled=True,
     )
-    ingested_documents: list[tuple[str, str, str]] = []
+    ingested_documents: list[tuple[str, str, str, str | None]] = []
 
     class FakeStore:
         def replace_document(
@@ -221,8 +221,11 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
             chunks: list[str],
             _embeddings: list[list[float]],
             _metadata: dict[str, Any],
+            source_file_sha256: str | None = None,
         ) -> int:
-            ingested_documents.append((tenant_id, document_id, "\n".join(chunks)))
+            ingested_documents.append(
+                (tenant_id, document_id, "\n".join(chunks), source_file_sha256)
+            )
             return len(chunks)
 
     class FakeEmbedder:
@@ -312,11 +315,152 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
         assert job["succeeded"] == 2
         assert job["skipped"] == 1
         assert traversal_response.status_code == 422
-        assert {document_id for _, document_id, _ in ingested_documents} == {
+        assert {document_id for _, document_id, _, _ in ingested_documents} == {
             "lab/architecture.md",
             "diagram.mmd",
         }
-        assert all(tenant_id == "default" for tenant_id, _, _ in ingested_documents)
+        assert all(tenant_id == "default" for tenant_id, _, _, _ in ingested_documents)
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+        main.app.dependency_overrides.pop(main.get_store, None)
+        main.app.dependency_overrides.pop(main.get_embedder, None)
+
+
+def test_folder_upload_skips_unchanged_and_deletes_missing_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        gateway_api_key="test-key",
+        document_loader_enabled=True,
+    )
+    unchanged_bytes = b"unchanged content"
+    document_hashes = {
+        ("tenant-a", "Policies/unchanged.md"): sha256(unchanged_bytes).hexdigest(),
+        ("tenant-a", "Policies/missing.md"): "old-hash",
+        ("tenant-a", "Other/keep.md"): "other-hash",
+    }
+    current_documents = set(document_hashes)
+    embed_batches: list[list[str]] = []
+    prune_calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    class FakeStore:
+        def document_is_current(
+            self,
+            tenant_id: str,
+            document_id: str,
+            source_file_sha256: str,
+            parser_model: str,
+        ) -> bool:
+            assert parser_model == "glm-ocr:latest"
+            return document_hashes.get((tenant_id, document_id)) == source_file_sha256
+
+        def replace_document(
+            self,
+            tenant_id: str,
+            document_id: str,
+            chunks: list[str],
+            _embeddings: list[list[float]],
+            _metadata: dict[str, Any],
+            source_file_sha256: str | None = None,
+        ) -> int:
+            current_documents.add((tenant_id, document_id))
+            document_hashes[(tenant_id, document_id)] = source_file_sha256 or ""
+            return len(chunks)
+
+        def delete_missing_folder_documents(
+            self,
+            tenant_id: str,
+            folder_root: str,
+            present_document_ids: tuple[str, ...],
+        ) -> int:
+            prune_calls.append((tenant_id, folder_root, present_document_ids))
+            prefix = f"{folder_root}/"
+            missing = {
+                document
+                for owner, document in current_documents
+                if owner == tenant_id and document.startswith(prefix)
+                and document not in present_document_ids
+            }
+            current_documents.difference_update((tenant_id, document) for document in missing)
+            return len(missing)
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "document"
+            embed_batches.append(texts)
+            return [[0.1, 0.2] for _ in texts]
+
+    class FakeParser:
+        model = "glm-ocr:latest"
+
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return [self.model]
+
+        def extract(self, path: Path) -> str:
+            if path.name == "bad.md":
+                raise ValueError("simulated parser failure")
+            return path.read_text(encoding="utf-8")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_store, lambda: FakeStore())
+    monkeypatch.setitem(main.app.dependency_overrides, main.get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(main.app) as client:
+            headers = {"Authorization": "Bearer test-key"}
+
+            def upload(paths: list[str], contents: list[bytes]) -> dict[str, Any]:
+                response = client.post(
+                    "/v1/document-loader/uploads",
+                    headers=headers,
+                    data={
+                        "relative_paths": json.dumps(paths),
+                        "tenant_id": "tenant-a",
+                        "sync_folder": "true",
+                    },
+                    files=[
+                        ("files", (path, content, "text/markdown"))
+                        for path, content in zip(paths, contents, strict=True)
+                    ],
+                )
+                assert response.status_code == 202, response.text
+                job_id = response.json()["job_id"]
+                for _ in range(100):
+                    job = client.get(f"/v1/document-loader/jobs/{job_id}", headers=headers).json()
+                    if job["status"] in {"completed", "completed_with_errors", "failed"}:
+                        return job
+                    time.sleep(0.01)
+                raise AssertionError("Loader job did not finish")
+
+            successful = upload(
+                ["Policies/unchanged.md", "Policies/new.md"],
+                [unchanged_bytes, b"new content"],
+            )
+            failed = upload(
+                ["Policies/new.md", "Policies/bad.md"],
+                [b"new content", b"bad content"],
+            )
+
+        assert successful["status"] == "completed"
+        assert successful["unchanged"] == 1
+        assert successful["succeeded"] == 1
+        assert successful["deleted_missing_documents"] == 1
+        assert ("tenant-a", "Policies") == prune_calls[0][:2]
+        assert prune_calls[0][2] == ("Policies/new.md", "Policies/unchanged.md")
+        assert embed_batches == [["new content"]]
+        assert ("tenant-a", "Policies/missing.md") not in current_documents
+        assert ("tenant-a", "Other/keep.md") in current_documents
+        assert failed["status"] == "completed_with_errors"
+        assert failed["deleted_missing_documents"] == 0
+        assert len(prune_calls) == 1
     finally:
         main.app.dependency_overrides.pop(get_settings, None)
         main.app.dependency_overrides.pop(main.get_store, None)
@@ -690,4 +834,48 @@ async def test_load_directory_reports_per_file_and_overall_status(tmp_path: Path
     assert retry_summary.skipped == 2
     assert retry_summary.processed == 1
     assert retry_summary.failed == 1
+    assert len(ingested) == 1
+
+
+async def test_load_directory_skips_unchanged_files_before_parsing(tmp_path: Path) -> None:
+    (tmp_path / "guide.md").write_text("same source", encoding="utf-8")
+    parser_calls = 0
+    ingested: list[IngestDocument] = []
+    stored_hashes: dict[str, str] = {}
+
+    class FakeParser:
+        model = "parse:latest"
+
+        def extract(self, path: Path) -> str:
+            nonlocal parser_calls
+            parser_calls += 1
+            return path.read_text(encoding="utf-8")
+
+    async def ingest(document: IngestDocument) -> dict[str, int]:
+        ingested.append(document)
+        stored_hashes[document.document_id] = document.source_file_sha256 or ""
+        return {"chunks_upserted": 1}
+
+    async def is_unchanged(document_id: str, source_hash: str) -> bool:
+        return stored_hashes.get(document_id) == source_hash
+
+    options = LoaderOptions(directory=tmp_path, include_extensions=("md",))
+    first = await load_directory(options, FakeParser(), ingest, should_skip_unchanged=is_unchanged)
+    second_events: list[dict[str, Any]] = []
+    second = await load_directory(
+        options,
+        FakeParser(),
+        ingest,
+        progress=second_events.append,
+        should_skip_unchanged=is_unchanged,
+    )
+
+    assert first.succeeded == 1
+    assert first.unchanged == 0
+    assert second.succeeded == 0
+    assert second.unchanged == 1
+    assert second.skipped == 1
+    assert second_events[-1]["stage"] == "completed"
+    assert any(event["stage"] == "unchanged" for event in second_events)
+    assert parser_calls == 1
     assert len(ingested) == 1

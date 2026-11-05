@@ -496,6 +496,65 @@ def test_chunk_management_store_queries_and_deletes_are_tenant_scoped() -> None:
     assert store.collection.deleted_filter == {"tenant_id": "tenant-a"}
 
 
+def test_loader_fingerprint_and_folder_deletion_are_scoped() -> None:
+    class Collection:
+        deleted_filter: dict[str, Any] | None = None
+
+        def find_one(self, query: dict, projection: dict) -> dict[str, Any]:
+            assert query == {
+                "tenant_id": "tenant-a",
+                "document_id": "Policies/current.md",
+                "chunk_index": 0,
+            }
+            assert projection["source_file_sha256"] == 1
+            return {
+                "source_file_sha256": "abc123",
+                "embedding_model": "voyage-test",
+                "embedding_dim": 2,
+                "chunk_policy": "char-v1:200:20",
+                "metadata": {"parser_model": "parse:latest"},
+            }
+
+        def distinct(self, field: str, query: dict) -> list[str]:
+            assert field == "document_id"
+            assert query == {"tenant_id": "tenant-a"}
+            return [
+                "Policies/current.md",
+                "Policies/removed.md",
+                "Policies-old/keep.md",
+                "Other/keep.md",
+            ]
+
+        def delete_many(self, query: dict[str, Any]) -> SimpleNamespace:
+            self.deleted_filter = query
+            return SimpleNamespace(deleted_count=1)
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = SimpleNamespace(
+        voyage_embedding_model="voyage-test",
+        embedding_dimensions=2,
+        chunk_size=200,
+        chunk_overlap=20,
+    )
+    store.collection = Collection()
+
+    assert store.document_is_current(
+        "tenant-a", "Policies/current.md", "abc123", "parse:latest"
+    )
+    assert not store.document_is_current(
+        "tenant-a", "Policies/current.md", "changed-hash", "parse:latest"
+    )
+    deleted = store.delete_missing_folder_documents(
+        "tenant-a", "Policies", ["Policies/current.md"]
+    )
+
+    assert deleted == 1
+    assert store.collection.deleted_filter == {
+        "tenant_id": "tenant-a",
+        "document_id": {"$in": ["Policies/removed.md"]},
+    }
+
+
 def test_chunk_management_api_enforces_tenant_key_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     token = "tenant-a-key"
     settings = Settings(

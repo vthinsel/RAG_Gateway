@@ -9,6 +9,7 @@ import io
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -77,6 +78,7 @@ class IngestDocument:
     document_id: str
     text: str
     metadata: dict[str, Any]
+    source_file_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class LoadSummary:
     discovered: int
     eligible: int
     skipped: int
+    unchanged: int
     processed: int
     succeeded: int
     failed: int
@@ -330,6 +333,15 @@ class OllamaDocumentParser:
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 IngestCallback = Callable[[IngestDocument], Awaitable[dict[str, Any]]]
+UnchangedCheck = Callable[[str, str], Awaitable[bool]]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 async def load_directory(
@@ -338,6 +350,7 @@ async def load_directory(
     ingest: IngestCallback,
     progress: ProgressCallback | None = None,
     max_document_chars: int = 1_000_000,
+    should_skip_unchanged: UnchangedCheck | None = None,
 ) -> LoadSummary:
     started = time.monotonic()
 
@@ -367,6 +380,8 @@ async def load_directory(
 
     succeeded = 0
     failed = 0
+    unchanged = 0
+    skipped = scan.skipped + len(scan.files) - total
     errors: list[dict[str, str]] = []
     root = options.directory.expanduser().resolve()
     for index, path in enumerate(files, start=1):
@@ -375,6 +390,21 @@ async def load_directory(
         try:
             if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
                 raise ValueError(f"File exceeds the {MAX_SOURCE_FILE_BYTES // (1024 * 1024)} MiB limit")
+            source_file_sha256 = await asyncio.to_thread(_file_sha256, path)
+            if should_skip_unchanged is not None and await should_skip_unchanged(
+                relative_path, source_file_sha256
+            ):
+                unchanged += 1
+                skipped += 1
+                emit(
+                    "unchanged",
+                    f"Skipped unchanged {relative_path}",
+                    current_file=relative_path,
+                    processed=index,
+                    unchanged=unchanged,
+                    skipped=skipped,
+                )
+                continue
             text = (await asyncio.to_thread(parser.extract, path)).strip()
             if not text:
                 raise ValueError("No text was extracted")
@@ -393,6 +423,7 @@ async def load_directory(
                         "loader": "ollama-document-loader",
                         "parser_model": parser.model,
                     },
+                    source_file_sha256=source_file_sha256,
                 )
             )
             succeeded += 1
@@ -427,7 +458,8 @@ async def load_directory(
         processed=total,
         succeeded=succeeded,
         failed=failed,
-        skipped=scan.skipped + len(scan.files) - total,
+        skipped=skipped,
+        unchanged=unchanged,
         elapsed_seconds=elapsed,
     )
     return LoadSummary(
@@ -435,7 +467,8 @@ async def load_directory(
         status=status,
         discovered=scan.discovered,
         eligible=total,
-        skipped=scan.skipped + len(scan.files) - total,
+        skipped=skipped,
+        unchanged=unchanged,
         processed=total,
         succeeded=succeeded,
         failed=failed,
