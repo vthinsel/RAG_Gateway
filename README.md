@@ -4,7 +4,7 @@
 
 A local-first Retrieval-Augmented Generation (RAG) service for local agents and chat UIs. It embeds document chunks and user questions with the configured model through MongoDB's AI Models API, retrieves matching chunks from MongoDB Atlas Vector Search, optionally fuses them with Atlas Search text results, and sends the augmented conversation to a model served by local Ollama.
 
-![landingpage](docs/RAG-gateway-landingpage.png)
+![landingpage](docs/pics/01-RAG-gateway-landingpage.png)
 
 The project is built around a practical balance: keep answer generation on infrastructure you control, use a capable embedding model to find relevant knowledge, and connect existing clients such as Open WebUI and Hermes through familiar APIs. This can reduce dependence on hosted generation and make answers more grounded in your own documents, while keeping the embedding and vector-storage services managed. It is not a zero-cost or fully private stack; review the data boundary and ongoing service costs before use.
 
