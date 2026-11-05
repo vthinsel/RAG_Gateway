@@ -49,6 +49,12 @@ Hybrid retrieval runs tenant-filtered vector search and Atlas Search text search
 
 Set `OLLAMA_REASONING_EFFORT` to a level supported by the configured Ollama model; leave it blank to keep that model's default. The playground's **Reasoning effort** field can override the setting for one chat request. Values are model-specific, so check the model's Ollama metadata; unsupported levels may fall back to its default. This option configures thinking effort and does not expose the model's reasoning trace in the playground.
 
+### Playground and retrieval evaluation
+
+The playground shows request activity, elapsed time, token usage when Ollama reports it, retrieved source scores, and an optional expected-source hit rate. The hit rate compares returned document IDs with expected IDs; it is not answer-accuracy scoring. Its benchmark runs the same chat question across all eight reranking, hybrid-search, and reasoning on/off combinations. Results include answers, source scores, timings, and token use, and can be copied as a Markdown table. Reasoning-on uses the entered effort or `high` when blank; reasoning-off requests `none`.
+
+The evaluation workbench accepts up to 100 labeled cases and has independent reranking and hybrid-search checkboxes. Saved runs store the effective option values and use a name like `tenant=default | rerank=on | hybrid=off`. Runs can be compared when tenant, top K, and labeled dataset match; the rerank/hybrid settings may differ so their retrieval metrics can be compared. Existing runs created before option tracking show the flags as unknown. Evaluation metrics measure retrieval only, not generated-answer or citation correctness.
+
 ## 2. At a Glance
 
 The system has a local part and cloud services. Text sent to MongoDB's AI model endpoint for embeddings and chunks/vectors stored in Atlas leave the local environment. Answer generation stays on the configured Ollama service.
@@ -105,7 +111,9 @@ The `/v1/*` routes require a bearer token. When `API_KEY_REGISTRY` is empty, the
 | --- | --- |
 | `GET /v1/models` | Advertises the model name exposed by the gateway, `rag-local` by default. |
 | `GET /v1/status` | Reports safe status for Atlas, vector index, Ollama, MongoDB AI API, and Gateway authentication. |
-| `GET /tools/playground` | Opens the browser playground to inspect retrieved passages or try RAG chat. |
+| `GET /tools/playground` | Opens the playground for retrieval, RAG chat, processing metrics, and an eight-option benchmark. |
+| `GET /tools/evaluation` | Opens the labeled retrieval evaluation and saved-baseline comparison workbench. |
+| `GET /tools/ollama` | Manages Ollama models and shows model details, including reported reasoning options. |
 | `GET /v1` | Returns authenticated gateway status and compatibility route information. |
 | `GET /v1/api/tags` | Returns an Ollama-compatible list containing the gateway model for model discovery. |
 | `GET /v1/api/ps` | Returns an Ollama-compatible running-model response with an empty list; backend model residency is not exposed. |
@@ -121,12 +129,15 @@ The `/v1/*` routes require a bearer token. When `API_KEY_REGISTRY` is empty, the
 | `PUT /v1/admin/environment` | Admin-only persistent settings update. |
 | `POST /v1/admin/environment/gateway-api-key` | Generates a replacement key, returned once and not persisted until saved. |
 | `POST /v1/retrieve` | Searches for and returns passages matching a question, without generating an answer. |
+| `POST /v1/evaluations/retrieval` | Evaluates labeled cases; accepts `rerank_enabled` and `hybrid_enabled` options. |
+| `GET /v1/evaluations/retrieval?tenant_id=...` | Lists saved runs, configurations, and metrics for a tenant. |
+| `GET /v1/evaluations/retrieval/{run_id}/compare/{baseline_id}` | Compares compatible runs, including different reranking/hybrid settings. |
 | `POST /v1/chat/completions` | Retrieves evidence, augments the conversation, and sends the request to Ollama. |
 | `GET /healthz` and `GET /readyz` | Check, respectively, whether the process responds and whether essential dependencies/configuration are available. |
 
 The `/tools/chunks` page presents the same tenant-scoped statistics and document list. It supports deleting one document or clearing a tenant; tenant-wide deletion requires typing the tenant ID to confirm. Use a key authorized for the target tenant.
 
-The root page (`/`) links to the tools and API documentation, and reports live status for Atlas, the vector index, Ollama, the MongoDB AI Models API, and Gateway authentication. `/tools/environment` edits all application settings and persists them to `.env`; configured secrets are redacted. Its **Generate new GATEWAY_API_KEY** action displays the cryptographically random key once for copying. Copy it before saving, then restart the Gateway and update clients. This administration page requires the current `GATEWAY_API_KEY` and should only be used on localhost or trusted HTTPS.
+The root page (`/`) links to the tools and API documentation, and reports live status for Atlas, the vector index, Ollama, the MongoDB AI Models API, and Gateway authentication. `/tools/environment` edits all application settings and persists them to `.env`; configured secrets are redacted. Its **Generate new GATEWAY_API_KEY** action displays the cryptographically random key once for copying. Copy it before saving, then restart the Gateway and update clients. This administration page requires the current `GATEWAY_API_KEY` and should only be used on localhost or trusted HTTPS. The Ollama model manager's **Show** action displays model metadata and any reasoning levels/default reported by the model.
 
 ## 4. How a Document Is Ingested
 
@@ -206,7 +217,7 @@ After restarting the service, open `http://127.0.0.1:8000/tools/document-loader`
 
 ### Experiment with uploaded documents in the playground
 
-After the document-loader job reports successful ingestion, open `http://127.0.0.1:8000/tools/playground`, enter the same tenant ID and an authorized bearer key, and select **Retrieve sources only**. Ask a question about the uploaded content to see the matching chunks, document IDs, and retrieval scores. This is a way to test document extraction and retrieval without connecting or calling a chat LLM; no generated answer is requested in this mode.
+After the document-loader job reports successful ingestion, open `http://127.0.0.1:8000/tools/playground`, enter the same tenant ID and an authorized bearer key, and select **Retrieve sources only**. Ask a question about the uploaded content to see the matching chunks, document IDs, and retrieval scores. This tests extraction and retrieval without calling the chat model. In **Answer with RAG** mode, the workbench reports elapsed time, Ollama token usage when available, source scores, and optional source hits against expected document IDs. Use **Benchmark all 8 combinations** to compare reranking, hybrid search, and reasoning on/off; each result includes its answer and sources, and the set can be exported to the clipboard as a Markdown table.
 
 Retrieval still needs the configured embedding service to vectorize the question and MongoDB Atlas with a ready vector-search index to search the ingested chunks. PDF/image OCR may also need the configured Ollama parser during ingestion. Chat mode (**Answer with RAG**) additionally calls the configured Ollama chat model. A document preview alone does not ingest it, so finish the loader job before testing it in the playground.
 
@@ -217,7 +228,7 @@ A user types in Open WebUI or sends a request from Hermes. These applications do
 1. The client sends an OpenAI-compatible request to `POST /v1/chat/completions`, with `messages`, a bearer token, and optionally `X-Tenant-ID`.
 2. The gateway extracts the last three non-empty user messages and combines them to provide some context for follow-up questions, such as “what about backups?”
 3. The combined question is sent to the configured MongoDB AI model endpoint with `input_type=query` to obtain a vector.
-4. Atlas searches for the nearest chunks within the authorized tenant. The pipeline applies `RETRIEVAL_TOP_K`, then keeps results whose score is greater than or equal to `RETRIEVAL_MIN_SCORE`.
+4. Atlas searches within the authorized tenant using vector search and, when hybrid search is enabled, Atlas Search text retrieval; the Gateway fuses branch rankings with reciprocal-rank fusion. Vector-only results are filtered by `RETRIEVAL_MIN_SCORE`; fused scores use a different scale and are not filtered by that vector threshold. Optional reranking can reorder vector candidates.
 5. The gateway adds the retrieved passages to a system message. Sources are labeled `[S1]`, `[S2]`, and so on. Document text is treated as untrusted data: selected prompt and citation markers are neutralized, and the evidence block uses a random delimiter.
 6. The augmented request is sent to Ollama's local chat API.
 7. The response is returned to the client. In non-streaming mode, sources are in the response's `sources` field. In streaming mode, they appear in an initial SSE event using a non-standard `sources` extension; some clients may ignore it.
@@ -310,13 +321,15 @@ Settings are stored in `.env`; `.env.example` lists the names and starting value
 | `MONGODB_API_MODEL_ENDPOINT` | MongoDB API model service hostname; defaults to `ai.mongodb.com`. |
 | `MONGODB_API_KEY` | Required for embedding requests; also used by the startup model check. |
 | `ATLAS_VECTOR_INDEX` | Name of the Vector Search index already created in Atlas. |
+| `ATLAS_SEARCH_INDEX` | Name of the Atlas Search index used for hybrid retrieval. |
 | `MONGODB_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | MongoDB AI embedding service and vector format. |
 | `GATEWAY_API_KEY` or `API_KEY_REGISTRY` | Shared authentication or static key-to-tenant authorization. |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local generation service address and model. Compose overrides `OLLAMA_BASE_URL` in the container to reach the host. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_REASONING_EFFORT` | Local generation service, model, and optional model-supported reasoning level. Blank reasoning effort uses the model default. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Character-based document chunking. |
 | `EMBEDDING_BATCH_SIZE` | Maximum texts per MongoDB AI model request, in addition to the estimated token budget. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Maximum result count and minimum original vector score. |
 | `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_RERANK_MODEL`, `RETRIEVAL_RERANK_CANDIDATES` | Optional Atlas Native Reranking and its model and candidate-pool size. Requires MongoDB 9.0+ and project-level enablement. |
+| `RETRIEVAL_HYBRID_ENABLED`, `RETRIEVAL_HYBRID_CANDIDATES` | Optional Atlas Search + vector rank fusion and its per-branch candidate limit. |
 
 `API_KEY_REGISTRY` is a JSON object whose keys are lowercase SHA-256 hex digests of raw bearer secrets and whose values are arrays of tenant ID strings. Example:
 
@@ -333,7 +346,7 @@ Embeddings and storage are cloud services in this architecture: source text and 
 
 At startup, the gateway logs the Ollama models it discovers, pings Atlas without exposing URI credentials, checks whether the configured Atlas Vector Search index exists and is queryable, and lists the distinct tenant IDs found in the collection. If `MONGODB_API_KEY` is configured, it also sends a small model-check embedding request to the MongoDB AI API endpoint; this request may count toward API usage. Otherwise that check is logged as skipped. Document ingestion and query embedding use the same endpoint and key.
 
-The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. It has a retrieval evaluation workbench for manually labeled question/document cases, but no answer-quality evaluation. Atlas Native Reranking is configurable through the Gateway; hybrid search, Prometheus metrics, and document-level ACL filtering are not implemented. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
+The application stores embedding and chunk provenance, but cannot yet automatically migrate to a new model, skip unchanged files, or synchronize files removed from the source folder. Its retrieval evaluation workbench records rerank/hybrid settings and compares labeled retrieval runs, but it does not evaluate generated answer or citation quality. Hybrid search requires an Atlas Search index in addition to the Vector Search index. Document-level ACL filtering is not implemented. Evaluate the score threshold and chunking settings with representative questions before a broad rollout.
 
 ## 8. Quick Start
 

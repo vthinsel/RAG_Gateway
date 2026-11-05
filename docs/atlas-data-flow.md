@@ -195,6 +195,7 @@ Content-Type: application/json
 {
   "query": "How many days of leave are available?",
   "top_k": 5,
+  "rerank_enabled": false,
   "hybrid_enabled": true
 }
 ```
@@ -203,6 +204,11 @@ Content-Type: application/json
 1 to 50; when omitted, `RETRIEVAL_TOP_K` (default: 5) is used. The query is capped
 at `MAX_QUERY_CHARS` (default: 8,000). `X-Tenant-ID` selects the tenant, falling
 back to `DEFAULT_TENANT_ID` when omitted.
+
+`rerank_enabled` and `hybrid_enabled` are optional booleans. When omitted, each
+uses its corresponding `RETRIEVAL_RERANK_ENABLED` or
+`RETRIEVAL_HYBRID_ENABLED` setting; an explicit value overrides the server
+default for that request. The same options are accepted by chat requests.
 
 The gateway embeds the query using `input_type: "query"`, then sends an aggregation
 to the configured collection. Its `$vectorSearch` stage uses:
@@ -243,6 +249,27 @@ is the RRF score and branch scores are exposed as `vector_score` and
 applied to the fused score, which has a different scale. Both modes return up to
 `top_k` matches in `{"data": [...]}`.
 
+## Retrieval evaluation and saved baselines
+
+`POST /v1/evaluations/retrieval` accepts the same `rerank_enabled` and
+`hybrid_enabled` options along with a tenant, top K, and manually labeled cases.
+Each case contains a query and expected document IDs. The evaluator measures hit
+rate, recall, mean reciprocal rank, and latency; it does not judge generated
+answers or citations. If an option is omitted, its current server setting is
+resolved and the effective value is saved with the run.
+
+Evaluation results and case details are stored in the local SQLite database
+configured by `OPERATIONS_DB_PATH`. Saved-run summaries preserve both flags and
+name each run with its tenant and configuration, for example
+`tenant=default | rerank=on | hybrid=off`. Existing databases are migrated
+without losing earlier runs; records created before these flags existed are
+shown with unknown option values.
+
+Runs can be compared when they use the same tenant, top K, and labeled dataset.
+Their reranking and hybrid settings may differ intentionally; the comparison
+returns the current and baseline names/configuration with metric deltas. These
+metrics evaluate retrieval, not answer quality.
+
 ## How Atlas is used across the gateway
 
 Atlas is shared by the gateway's ingestion and query features:
@@ -250,7 +277,8 @@ Atlas is shared by the gateway's ingestion and query features:
 1. **Ingestion** — `POST /v1/ingest` and document-loader jobs extract or accept
    source text, chunk it, request document embeddings, then upsert chunks in Atlas.
 2. **Retrieval-only** — `POST /v1/retrieve` embeds a query and returns qualifying
-   Atlas matches for inspection and evaluation.
+  Atlas matches for inspection and evaluation, optionally with reranking and/or
+  hybrid vector + lexical retrieval.
 3. **RAG chat** — `POST /v1/chat/completions` and the Ollama-compatible
    `POST /v1/api/chat` retrieve evidence before forwarding an augmented prompt to
    Ollama. The gateway extracts text from up to the latest three user messages,
@@ -260,7 +288,10 @@ Atlas is shared by the gateway's ingestion and query features:
 4. **Operations and management** — tenant/document listing and deletion operate on
    the same Atlas collection. The gateway's `/tools/chunks` interface uses these
    APIs; deleting a document or tenant removes its chunk records.
-5. **Status checks** — startup pings Atlas, checks the configured vector index's
+5. **Evaluation** — labeled runs record their effective rerank/hybrid settings in
+  SQLite and can be compared across those settings when tenant, top K, and cases
+  match.
+6. **Status checks** — startup pings Atlas, checks the configured vector index's
    existence/queryable state, and logs tenant IDs found in the collection.
    `GET /v1/status` exposes safe dependency state; `/readyz` checks required
    configuration and Atlas connectivity.

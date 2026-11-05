@@ -49,6 +49,12 @@ La recherche hybride exécute une recherche vectorielle filtrée par tenant et u
 
 Définissez `OLLAMA_REASONING_EFFORT` sur un niveau pris en charge par le modèle Ollama configuré ; laissez le paramètre vide pour conserver le comportement par défaut du modèle. Le champ **Reasoning effort** du playground peut remplacer ce réglage pour une seule requête de chat. Les valeurs dépendent du modèle : consultez ses métadonnées Ollama ; une valeur non prise en charge peut revenir au niveau par défaut. Ce paramètre règle l'effort de réflexion sans afficher sa trace dans le playground.
 
+### Playground et évaluation de la recherche
+
+Le playground affiche l'activité de la requête, sa durée, l'utilisation des tokens lorsqu'elle est renvoyée par Ollama, les scores des sources et, en option, le taux de documents attendus retrouvés. Ce taux compare les identifiants retournés aux identifiants attendus ; il ne mesure pas l'exactitude de la réponse. Le benchmark exécute la même question de chat avec les huit combinaisons de reranking, recherche hybride et raisonnement activé/désactivé. Il compare les réponses, sources, scores, durées et tokens, puis peut copier un tableau Markdown dans le presse-papiers. Le raisonnement activé utilise le niveau saisi ou `high` si le champ est vide ; le mode désactivé demande `none`.
+
+L'outil d'évaluation accepte jusqu'à 100 cas annotés et possède des cases séparées pour le reranking et la recherche hybride. Les valeurs effectives sont conservées avec chaque exécution ; son nom inclut par exemple `tenant=default | rerank=on | hybrid=off`. On peut comparer des exécutions ayant le même tenant, le même top K et le même jeu de questions/documents attendus, même si leurs options diffèrent. Les anciennes exécutions ne contenant pas ces options les affichent comme inconnues. Ces métriques évaluent la recherche, pas la qualité des réponses ou des citations.
+
 ## 2. Vue d'ensemble
 
 Le système comporte une partie locale et des services cloud. Les textes envoyés au point d'accès du modèle AI MongoDB pour créer les embeddings et les chunks/vecteurs stockés dans Atlas quittent donc l'environnement local. La génération de la réponse reste sur le service Ollama configuré.
@@ -105,7 +111,9 @@ Les routes `/v1/*` demandent un bearer token. Avec `API_KEY_REGISTRY` vide, il d
 | --- | --- |
 | `GET /v1/models` | Annonce le nom de modèle exposé par la gateway, par défaut `rag-local`. |
 | `GET /v1/status` | Retourne l'état non sensible d'Atlas, de l'index, d'Ollama, de MongoDB AI API et de l'authentification. |
-| `GET /tools/playground` | Ouvre le playground web pour examiner les passages trouvés ou tester le chat RAG. |
+| `GET /tools/playground` | Ouvre le playground pour tester la recherche, le chat RAG et le benchmark à huit combinaisons. |
+| `GET /tools/evaluation` | Ouvre l'outil d'évaluation annotée et de comparaison des baselines enregistrées. |
+| `GET /tools/ollama` | Gère les modèles Ollama et affiche leurs détails et options de raisonnement rapportées. |
 | `GET /v1` | Retourne l'état authentifié de la gateway et ses routes de compatibilité. |
 | `GET /v1/api/tags` | Retourne une liste de modèles compatible Ollama contenant le modèle de la gateway. |
 | `GET /v1/api/ps` | Retourne une réponse compatible Ollama avec une liste vide ; l'état mémoire du modèle backend n'est pas exposé. |
@@ -121,12 +129,15 @@ Les routes `/v1/*` demandent un bearer token. Avec `API_KEY_REGISTRY` vide, il d
 | `PUT /v1/admin/environment` | Mise à jour persistante des paramètres, réservée à l'administrateur. |
 | `POST /v1/admin/environment/gateway-api-key` | Génère une nouvelle clé, retournée une fois et non persistée avant enregistrement. |
 | `POST /v1/retrieve` | Recherche et retourne les passages correspondant à une question, sans génération de réponse. |
+| `POST /v1/evaluations/retrieval` | Évalue des cas annotés ; accepte `rerank_enabled` et `hybrid_enabled`. |
+| `GET /v1/evaluations/retrieval?tenant_id=...` | Liste les exécutions enregistrées, leurs options et métriques pour un tenant. |
+| `GET /v1/evaluations/retrieval/{run_id}/compare/{baseline_id}` | Compare les exécutions compatibles, y compris avec des options de recherche différentes. |
 | `POST /v1/chat/completions` | Effectue la recherche, enrichit la conversation et transmet la demande à Ollama. |
 | `GET /healthz` et `GET /readyz` | Vérifient respectivement que le processus répond et que les dépendances/configurations essentielles sont disponibles. |
 
 La page `/tools/chunks` présente les mêmes statistiques par tenant et la liste des documents. Elle permet de supprimer un document ou tous ceux d'un tenant ; pour une suppression complète, il faut saisir l'identifiant du tenant afin de confirmer. Utilisez une clé autorisée pour le tenant concerné.
 
-La page racine (`/`) donne accès aux outils et à la documentation API, et affiche l'état en direct d'Atlas, de l'index vectoriel, d'Ollama, de l'API MongoDB AI Models et de l'authentification. `/tools/environment` permet de modifier tous les paramètres et les enregistre dans `.env` ; les secrets existants sont masqués. Le bouton **Generate new GATEWAY_API_KEY** crée une clé aléatoire cryptographique affichée une seule fois pour être copiée. Copiez-la avant l'enregistrement, puis redémarrez la gateway et mettez à jour les clients. Cette page d'administration exige le `GATEWAY_API_KEY` courant et doit être utilisée uniquement sur localhost ou en HTTPS de confiance.
+La page racine (`/`) donne accès aux outils et à la documentation API, et affiche l'état en direct d'Atlas, de l'index vectoriel, d'Ollama, de l'API MongoDB AI Models et de l'authentification. `/tools/environment` permet de modifier tous les paramètres et les enregistre dans `.env` ; les secrets existants sont masqués. Le bouton **Generate new GATEWAY_API_KEY** crée une clé aléatoire cryptographique affichée une seule fois pour être copiée. Copiez-la avant l'enregistrement, puis redémarrez la gateway et mettez à jour les clients. Cette page d'administration exige le `GATEWAY_API_KEY` courant et doit être utilisée uniquement sur localhost ou en HTTPS de confiance. Dans le gestionnaire Ollama, **Show** affiche les métadonnées du modèle et les niveaux de raisonnement éventuellement rapportés.
 
 ## 4. Comment un document est ingéré
 
@@ -206,7 +217,7 @@ Après redémarrage du service, ouvrez `http://127.0.0.1:8000/tools/document-loa
 
 ### Tester les documents envoyés dans le playground
 
-Une fois l'ingestion terminée avec succès dans le chargeur de documents, ouvrez `http://127.0.0.1:8000/tools/playground`, indiquez le même tenant et un bearer token autorisé, puis choisissez **Retrieve sources only**. Posez une question sur le contenu envoyé pour afficher les chunks correspondants, leurs identifiants de document et leurs scores de recherche. Ce mode permet de tester l'extraction et la recherche sans connecter ni appeler un modèle LLM de chat ; aucune réponse générée n'est demandée.
+Une fois l'ingestion terminée avec succès dans le chargeur de documents, ouvrez `http://127.0.0.1:8000/tools/playground`, indiquez le même tenant et un bearer token autorisé, puis choisissez **Retrieve sources only**. Posez une question sur le contenu envoyé pour afficher les chunks correspondants, leurs identifiants de document et leurs scores de recherche. Ce mode teste l'extraction et la recherche sans appeler le modèle de chat. En mode **Answer with RAG**, le playground affiche la durée, les tokens rapportés par Ollama, les scores des sources et, en option, leur correspondance avec des documents attendus. **Benchmark all 8 combinations** compare reranking, recherche hybride et raisonnement activés/désactivés ; les réponses et scores sont affichés, et le tableau peut être exporté en Markdown vers le presse-papiers.
 
 La recherche nécessite toutefois le service d'embedding configuré pour vectoriser la question ainsi que MongoDB Atlas avec un index Vector Search opérationnel pour retrouver les chunks ingérés. L'OCR des PDF et images peut aussi nécessiter le parseur Ollama configuré pendant l'ingestion. Le mode **Answer with RAG** appelle en plus le modèle de chat Ollama configuré. Un simple aperçu ne réalise pas l'ingestion : attendez la fin du job du chargeur avant de tester le document dans le playground.
 
@@ -217,7 +228,7 @@ Un utilisateur écrit dans Open WebUI ou envoie une demande depuis Hermes. Ces a
 1. Le client envoie une requête OpenAI-compatible à `POST /v1/chat/completions`, avec `messages`, un bearer token et éventuellement `X-Tenant-ID`.
 2. La gateway extrait les trois derniers messages utilisateur non vides et les combine pour fournir un peu de contexte aux questions de suivi, par exemple « et pour les sauvegardes ? ».
 3. La question combinée est envoyée au point d'accès du modèle AI MongoDB configuré avec `input_type=query` pour obtenir un vecteur.
-4. Atlas recherche les chunks les plus proches dans le tenant autorisé. Le pipeline applique `RETRIEVAL_TOP_K`, puis garde les résultats dont le score est supérieur ou égal à `RETRIEVAL_MIN_SCORE`.
+4. Atlas recherche dans le tenant autorisé avec la recherche vectorielle et, si elle est activée, la recherche textuelle Atlas Search ; la gateway fusionne les classements avec reciprocal-rank fusion. `RETRIEVAL_MIN_SCORE` ne filtre que les scores vectoriels seuls, car le score fusionné utilise une autre échelle. Le reranking peut ensuite réordonner les candidats vectoriels.
 5. La gateway ajoute les extraits trouvés à un message système. Les sources sont identifiées `[S1]`, `[S2]`, etc. Les textes des documents sont des données non fiables : certains marqueurs de prompt et de citation sont neutralisés, et le bloc d'évidence utilise un délimiteur aléatoire.
 6. La requête enrichie est envoyée à l'API de chat locale d'Ollama.
 7. La réponse est renvoyée au client. En mode non-streaming, les sources sont dans le champ `sources` de la réponse. En streaming, elles apparaissent dans un premier événement SSE utilisant une extension non standard `sources` ; certains clients peuvent l'ignorer.
@@ -310,13 +321,15 @@ Les réglages se trouvent dans `.env` ; `.env.example` donne les noms et valeurs
 | `MONGODB_API_MODEL_ENDPOINT` | Nom d'hôte du service API Model de MongoDB ; valeur par défaut : `ai.mongodb.com`. |
 | `MONGODB_API_KEY` | Requise pour les requêtes d'embedding ; elle sert aussi à la vérification du modèle au démarrage. |
 | `ATLAS_VECTOR_INDEX` | Nom de l'index Vector Search déjà créé dans Atlas. |
+| `ATLAS_SEARCH_INDEX` | Nom de l'index Atlas Search utilisé par la recherche hybride. |
 | `MONGODB_API_KEY`, `VOYAGE_EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Service MongoDB AI pour les embeddings et format des vecteurs. |
 | `GATEWAY_API_KEY` ou `API_KEY_REGISTRY` | Authentification partagée ou autorisations statiques clé-vers-tenant. |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Adresse et modèle de génération local. Compose remplace `OLLAMA_BASE_URL` dans le conteneur pour joindre l'hôte. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_REASONING_EFFORT` | Service local, modèle et niveau de raisonnement optionnel pris en charge par le modèle. Vide, le niveau par défaut du modèle est conservé. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Découpage caractère des documents. |
 | `EMBEDDING_BATCH_SIZE` | Nombre maximal de textes par requête au modèle AI MongoDB, avec budget de tokens estimé en plus. |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SCORE` | Nombre maximal de résultats et score vectoriel d'origine minimal. |
 | `RETRIEVAL_RERANK_ENABLED`, `RETRIEVAL_RERANK_MODEL`, `RETRIEVAL_RERANK_CANDIDATES` | Native Reranking Atlas en option, son modèle et la taille du pool de candidats. Nécessite MongoDB 9.0+ et l'activation dans le projet. |
+| `RETRIEVAL_HYBRID_ENABLED`, `RETRIEVAL_HYBRID_CANDIDATES` | Fusion optionnelle des recherches vectorielle et Atlas Search, et nombre maximal de candidats par branche. |
 
 `API_KEY_REGISTRY` est un objet JSON dont les clés sont les empreintes SHA-256 en hexadécimal minuscule des secrets bearer bruts, et dont les valeurs sont des tableaux d'identifiants de tenant. Exemple :
 
@@ -333,7 +346,7 @@ Les embeddings et le stockage sont des services cloud dans cette architecture : 
 
 Au démarrage, la gateway journalise les modèles Ollama détectés, envoie un ping à Atlas sans exposer les identifiants de l'URI, vérifie que l'index Vector Search configuré existe et est interrogeable, et liste les identifiants de tenant présents dans la collection. Si `MONGODB_API_KEY` est configurée, elle envoie également une petite requête d'embedding au point d'accès MongoDB AI, susceptible de compter dans l'utilisation de l'API ; sinon, cette vérification est journalisée comme ignorée. L'ingestion des documents et l'embedding des requêtes utilisent le même point d'accès et la même clé.
 
-L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. Elle propose un outil d'évaluation de la recherche à partir de questions et de documents attendus annotés manuellement, mais n'évalue pas la qualité des réponses générées. Native Reranking Atlas est configurable dans la gateway ; la recherche hybride, les métriques Prometheus et le filtrage ACL au niveau document ne sont pas implémentés. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
+L'application stocke des informations de provenance sur les embeddings et les chunks, mais ne sait pas encore effectuer une migration automatisée de modèle, ignorer les fichiers inchangés ni synchroniser la disparition de fichiers du dossier. L'outil d'évaluation conserve les options de reranking et de recherche hybride et permet de comparer des exécutions annotées ; il n'évalue pas la qualité des réponses générées. La recherche hybride nécessite un index Atlas Search en plus de l'index Vector Search. Le filtrage ACL au niveau document n'est pas implémenté. Le seuil de score et les paramètres de chunking doivent être évalués avec des questions représentatives avant un déploiement large.
 
 ## 8. Démarrage rapide
 
