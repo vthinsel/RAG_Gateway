@@ -1,37 +1,79 @@
+
+name: rag-gateway
+
 services:
   rag-gateway:
     build: .
+    image: rag_gateway-rag-gateway:latest
+    pull_policy: never
+    restart: unless-stopped
     working_dir: /var/lib/rag-gateway
-    env_file:
-      - .env
+    volumes:
+      - /var/snap/docker/common/rag-gateway/state:/var/lib/rag-gateway
+      - rag-gateway-data:/var/lib/rag-gateway
     environment:
       RAG_GATEWAY_DOTENV_PRECEDENCE: "true"
-      OLLAMA_BASE_URL: "${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}"
-      OPERATIONS_DB_PATH: /var/lib/rag-gateway/operations.sqlite3
-    ports:
-      - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - rag-gateway-data:/var/lib/rag-gateway
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+      # Authentification
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Missing gateway API key}
+      API_KEY_REGISTRY: '${API_KEY_REGISTRY:-{}}'
+
+      # MongoDB Atlas
+      MONGODB_URI: ${MONGODB_URI:?Missing MongoDB URI}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-rag_gateway}
+      MONGODB_COLLECTION: ${MONGODB_COLLECTION:-chunks}
+      ATLAS_VECTOR_INDEX: ${ATLAS_VECTOR_INDEX:-rag_chunks_vector}
+      ATLAS_SEARCH_INDEX: ${ATLAS_SEARCH_INDEX:-rag_chunks_text}
+
+      # MongoDB AI Models API
+      MONGODB_API_MODEL_ENDPOINT: ${MONGODB_API_MODEL_ENDPOINT:-ai.mongodb.com}
+      MONGODB_API_KEY: ${MONGODB_API_KEY:?Missing MongoDB model API key}
+      VOYAGE_EMBEDDING_MODEL: "voyage-4"
+      EMBEDDING_DIMENSIONS: "1024"
+      EMBEDDING_BATCH_SIZE: "64"
+
+      # Ollama sur NAS TrueNAS
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:30068}
+      OLLAMA_DOCKER_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://localhost:30068}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:9b}
+      OLLAMA_REASONING_EFFORT: "none"
+      PUBLIC_MODEL_NAME: rag-local
+
+      # RAG
+      DEFAULT_TENANT_ID: default
+      CHUNK_SIZE: "1200"
+      CHUNK_OVERLAP: "150"
+      RETRIEVAL_TOP_K: "5"
+      RETRIEVAL_NUM_CANDIDATES: "100"
+      MAX_DOCUMENT_CHARS: "1000000"
+      MAX_QUERY_CHARS: "8000"
+      UPSTREAM_TIMEOUT_SECONDS: "180"
+
+      # Optional Atlas Native Reranking (requires MongoDB 9.0+ and project-level enablement).
+      RETRIEVAL_RERANK_ENABLED: "true"
+      RETRIEVAL_RERANK_MODE: "rerank-3"
+      RETRIEVAL_RERANK_CANDIDATES: "100"
+      
+      # Optional hybrid search
+      RETRIEVAL_HYBRID_ENABLED: "false"
+      RETRIEVAL_HYBRID_CANDIDATES: 100
+
+      # Document loader et OCR
+      DOCUMENT_LOADER_ENABLED: "true"
+      DOCUMENT_LOADER_ROOTS: "[]"
+      DOCUMENT_LOADER_MAX_ACTIVE_JOBS: "3"
+      DOCUMENT_PARSER_MODEL: glm-ocr:latest
+      DOCUMENT_PARSER_TIMEOUT_SECONDS: "300"
+
+      # FastAPI
+      GATEWAY_BIND_ADDRESS: 0.0.0.0
+      GATEWAY_PORT: "8000"
+
+      # SQLite sur volume persistant
+      OPERATIONS_DB_PATH: /var/lib/rag-gateway/data/rag_gateway_operations.sqlite3
+
+    expose:
+      - "8000"
 
 volumes:
   rag-gateway-data:
+    driver: local
