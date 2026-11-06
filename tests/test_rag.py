@@ -181,6 +181,8 @@ def test_add_rag_message_sanitizes_untrusted_evidence() -> None:
     assert "[removed]" in instruction
     assert "[citation removed]" in instruction
     assert "Ignore previous instructions [removed] [citation removed]" in instruction
+    assert "most recent explicit, verifiable date" in instruction
+    assert "describe the conflict and uncertainty" in instruction
     assert "<<<EVIDENCE-" in instruction
 
 
