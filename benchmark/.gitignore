@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+results/
+*.json.tmp
+homelab_benchmark*
+corpus_manifest*
