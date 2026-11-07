@@ -11,7 +11,7 @@ import statistics
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -52,7 +52,7 @@ RETRIEVAL_OPTIONS = {
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def read_json(path: Path) -> Any:
@@ -63,7 +63,7 @@ def read_json(path: Path) -> Any:
 
 def validate_options(options: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(options, dict):
-        raise ValueError("Options must be a JSON object")
+        raise TypeError("Options must be a JSON object")
     unknown = set(options) - OPTION_NAMES
     if unknown:
         raise ValueError(f"Not supported at run time: {', '.join(sorted(unknown))}")
@@ -564,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Interrupted. Completed records were checkpointed.", file=sys.stderr)
         return 130
-    except (ValueError, OSError, httpx.HTTPError) as error:
+    except (ValueError, TypeError, OSError, httpx.HTTPError) as error:
         print(f"Benchmark error: {type(error).__name__}: {error}", file=sys.stderr)
         return 2
 

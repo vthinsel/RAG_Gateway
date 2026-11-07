@@ -1,17 +1,22 @@
 import asyncio
 import copy
 import json
+import os
+import subprocess
+import sys
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
-
 from run_benchmark import (
     build_parser,
     describe_conditions,
     execute_profiles,
-    load_questions,
     load_profiles,
+    load_questions,
     make_payload,
     output_path,
     perform_request,
@@ -191,3 +196,65 @@ def test_transport_and_malformed_response_failures_are_recorded(kind: str) -> No
     assert result["status"] == "error"
     assert result["timings_ms"]["client_total"] >= 0
     assert "error" in result
+
+
+def test_cli_over_real_http_writes_valid_json_and_live_progress() -> None:
+    token = "mock-cli-token-not-a-secret"
+    bodies = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            assert self.headers["Authorization"] == f"Bearer {token}"
+            assert self.headers["X-Tenant-ID"] == "test-tenant"
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            bodies.append(body)
+            finished = threading.Event()
+            finished.wait(0.03)
+            reply = json.dumps({
+                "choices": [{"message": {"content": "Mock answer [S1]"}, "finish_reason": "stop"}],
+                "sources": [{"citation": "S1", "document_id": "mock-atlas-id", "chunk_index": 0,
+                             "score": 0.8, "metadata": {}}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4},
+                "extra": token,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    folder = Path(__file__).parent / "results" / f"mock_cli_{uuid.uuid4().hex[:8]}"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        completed = subprocess.run([
+            sys.executable, str(Path(__file__).parent / "run_benchmark.py"),
+            "--base-url", f"http://127.0.0.1:{server.server_port}", "--tenant", "test-tenant",
+            "--ids", "HL-01,HL-02", "--temperature", "0", "--reasoning", "none",
+            "--progress-interval", "0.01", "--output-dir", str(folder),
+        ], env={**os.environ, "GATEWAY_API_KEY": token}, capture_output=True,
+            text=True, timeout=20, check=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert completed.returncode == 0, completed.stderr
+    assert "waiting single" in completed.stdout
+    assert "sources=1 | tokens=12" in completed.stdout
+    assert token not in completed.stdout + completed.stderr
+    assert len(bodies) == 2
+    files = list(folder.glob("*.json"))
+    assert len(files) == 1
+    raw = files[0].read_text(encoding="utf-8")
+    assert token not in raw
+    result = json.loads(raw)
+    assert result["state"] == "completed"
+    assert result["summary"]["reported_total_tokens"] == 24
+    assert result["records"][0]["raw_response"]["extra"] == "[REDACTED]"
+    assert result["conditions"]["requested_options"]["temperature"] == 0
+    assert result["conditions"]["requested_options"]["reasoning_effort"] == "none"
+    assert all("expected_answer" not in json.dumps(body) for body in bodies)
