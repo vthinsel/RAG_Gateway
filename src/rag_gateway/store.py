@@ -233,6 +233,8 @@ class AtlasStore:
         query: str | None = None,
         rerank_enabled: bool | None = None,
         hybrid_enabled: bool | None = None,
+        retrieval_num_candidates: int | None = None,
+        retrieval_min_score: float | None = None,
     ) -> list[dict[str, Any]]:
         if rerank_enabled is None:
             rerank_enabled = self.settings.retrieval_rerank_enabled
@@ -242,6 +244,14 @@ class AtlasStore:
         hybrid_limit = max(getattr(self.settings, "retrieval_hybrid_candidates", limit), limit)
         if (rerank_enabled or hybrid_enabled) and query is None:
             raise ValueError("A text query is required when reranking or hybrid search is enabled")
+        num_candidates = (
+            self.settings.retrieval_num_candidates
+            if retrieval_num_candidates is None else retrieval_num_candidates
+        )
+        min_score = (
+            self.settings.retrieval_min_score
+            if retrieval_min_score is None else retrieval_min_score
+        )
         if hybrid_enabled and rerank_enabled:
             vector_limit = min(hybrid_limit, rerank_limit)
         elif hybrid_enabled:
@@ -258,7 +268,7 @@ class AtlasStore:
                     "path": "embedding",
                     "queryVector": query_vector,
                     "numCandidates": max(
-                        self.settings.retrieval_num_candidates,
+                        num_candidates,
                         vector_limit,
                     ),
                     "limit": vector_limit,
@@ -342,7 +352,7 @@ class AtlasStore:
         matches = [
             candidate
             for candidate in candidates
-            if candidate["score"] >= self.settings.retrieval_min_score
+            if candidate["score"] >= min_score
         ]
         if not matches:
             if candidates:
@@ -353,7 +363,7 @@ class AtlasStore:
                     self.settings.atlas_vector_index,
                     len(candidates),
                     max(candidate["score"] for candidate in candidates),
-                    self.settings.retrieval_min_score,
+                    min_score,
                 )
             else:
                 logger.warning(

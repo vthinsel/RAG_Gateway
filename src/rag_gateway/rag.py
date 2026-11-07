@@ -24,13 +24,19 @@ async def retrieve_context(
     top_k: int | None = None,
     rerank_enabled: bool | None = None,
     hybrid_enabled: bool | None = None,
+    retrieval_num_candidates: int | None = None,
+    retrieval_min_score: float | None = None,
 ) -> list[dict[str, Any]]:
     query_vector = (await embedder.embed([query], input_type="query"))[0]
-    search_options: dict[str, bool] = {}
+    search_options: dict[str, Any] = {}
     if rerank_enabled is not None:
         search_options["rerank_enabled"] = rerank_enabled
     if hybrid_enabled is not None:
         search_options["hybrid_enabled"] = hybrid_enabled
+    if retrieval_num_candidates is not None:
+        search_options["retrieval_num_candidates"] = retrieval_num_candidates
+    if retrieval_min_score is not None:
+        search_options["retrieval_min_score"] = retrieval_min_score
     return store.search(
         tenant_id,
         query_vector,

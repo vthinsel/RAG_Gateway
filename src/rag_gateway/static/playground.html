@@ -114,6 +114,20 @@
         <input id="reasoning-effort" maxlength="64" placeholder="Use configured default">
         <span class="note">Chat only. Leave blank for OLLAMA_REASONING_EFFORT. Benchmark reasoning-on uses this level or high when blank; reasoning-off sends none.</span>
       </div>
+      <div class="two">
+        <div class="field">
+          <label for="retrieval-num-candidates">Retrieval candidates</label>
+          <input id="retrieval-num-candidates" type="number" min="1" step="1" placeholder="Use configured default">
+        </div>
+        <div class="field">
+          <label for="retrieval-min-score">Minimum vector score</label>
+          <input id="retrieval-min-score" type="number" min="0" max="1" step="0.01" placeholder="Use configured default">
+        </div>
+      </div>
+      <div class="field">
+        <label for="temperature">Temperature</label>
+        <input id="temperature" type="number" min="0" max="2" step="0.01" placeholder="Use configured default">
+      </div>
       <label class="checkbox-field" for="rerank-enabled">
         <input id="rerank-enabled" type="checkbox">
         Enable reranking for this request
@@ -189,6 +203,7 @@
 
     function updateReasoningEffortState() {
       reasoningEffortInput.disabled = mode.value === "retrieve";
+      document.querySelector("#temperature").disabled = mode.value === "retrieve";
     }
 
     mode.addEventListener("change", updateReasoningEffortState);
@@ -205,6 +220,21 @@
       benchmarkButton.disabled = disabled;
     }
 
+    function readOverrides() {
+      const overrides = {};
+      for (const [id, key] of [
+        ["temperature", "temperature"],
+        ["retrieval-num-candidates", "retrieval_num_candidates"],
+        ["retrieval-min-score", "retrieval_min_score"]
+      ]) {
+        const input = document.querySelector(`#${id}`);
+        if (!input.value.trim()) continue;
+        if (!input.checkValidity()) throw new Error(`Enter a valid ${input.labels[0].textContent.toLowerCase()}.`);
+        overrides[key] = Number(input.value);
+      }
+      return overrides;
+    }
+
     function readInputs() {
       const token = document.querySelector("#token").value.trim();
       const query = document.querySelector("#query").value.trim();
@@ -217,7 +247,7 @@
       if (!query) throw new Error("Enter a question.");
       if (!tenant || tenant.length > 256) throw new Error("Enter a valid tenant ID.");
       if (!Number.isInteger(topK) || topK < 1 || topK > 50) throw new Error("Sources to retrieve must be between 1 and 50.");
-      return { token, query, tenant, topK, expectedDocuments, reasoningEffort };
+      return { token, query, tenant, topK, expectedDocuments, reasoningEffort, overrides: readOverrides() };
     }
 
     async function sendRequest(path, payload, token, tenant) {
@@ -336,6 +366,7 @@
 
     function chatPayload(inputs, rerankEnabled, hybridEnabled, reasoningEffort = inputs.reasoningEffort) {
       const payload = {
+        ...inputs.overrides,
         model: "rag-local",
         messages: [{ role: "user", content: inputs.query }],
         stream: false,
@@ -356,6 +387,7 @@
         `Question: ${markdownCell(context.query)}`,
         `Tenant: ${markdownCell(context.tenant)}`,
         `Expected document IDs: ${markdownCell(context.expectedDocuments.join(", ") || "Not provided")}`,
+        `Request overrides: ${markdownCell(JSON.stringify(context.overrides))}`,
         "",
         "| Rerank | Hybrid | Reasoning | Time | Tokens | Expected-source hits | Source scores | Answer | Sources |",
         "| --- | --- | --- | ---: | --- | --- | --- | --- | --- |"
@@ -439,6 +471,7 @@
           selectedMode === "retrieve" ? "/v1/retrieve" : "/v1/chat/completions",
           selectedMode === "retrieve"
             ? {
+              ...inputs.overrides,
                 query: inputs.query,
                 top_k: inputs.topK,
                 rerank_enabled: rerankEnabled,

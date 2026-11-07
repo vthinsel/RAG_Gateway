@@ -268,6 +268,16 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `DELETE /v1/chunks/documents/{document_id}?tenant_id=...` | Delete one document's chunks |
 | `DELETE /v1/chunks/tenant?tenant_id=...` | Delete every document and chunk in a tenant |
 | `POST /v1/retrieve` | Inspect top-k chunks for a query; optional `top_k` must be between 1 and 50 |
+
+The playground and retrieval evaluation accept optional per-request overrides for
+`temperature` (0-2), `retrieval_num_candidates` (positive integer), and
+`retrieval_min_score` (0-1). Leave these controls blank to use the environment
+settings. Chat requests forward the effective temperature to Ollama; retrieval-only
+evaluation records it with the run but does not generate an answer. The minimum
+score applies to vector-only retrieval, including reranking; hybrid retrieval
+continues to use reciprocal-rank fusion without this cutoff. Candidate count is
+always raised to at least the vector result limit. Overrides do not change saved
+environment settings, and evaluation results retain their effective values.
 | `POST /v1/chat/completions` | Retrieve evidence, augment prompt, and call local Ollama; optional `top_k` must be between 1 and 50 |
 
 The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. Open `/tools/monitoring` and enter `GATEWAY_API_KEY` to watch recent API calls, in-flight requests, response codes, durations, and per-route totals; the feed is process-local, retains at most 500 completed calls, and refreshes every 1.5 seconds. Only matched route templates are recorded—request bodies and query-string values are not captured. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/ollama` to list, pull, copy, inspect, or delete Ollama models, create a context-window variant, inspect running models, and view model details including Ollama-supported reasoning levels; this page requires the administrator `GATEWAY_API_KEY`. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs and choose reranking and hybrid search. Each saved baseline records its tenant and option flags in its run name; compare runs using the same tenant, top K, and labeled dataset to measure hit rate, recall, mean reciprocal rank, and latency. These metrics evaluate retrieval, not generated-answer correctness. Open `/tools/playground` to inspect activity and per-request timing, token usage, retrieved-source scores, and optional expected-source hits. Its benchmark runs all eight combinations of reranking, hybrid search, and reasoning on/off, with answers, scores, timings, and token use available for comparison and Markdown clipboard export. Ollama reasoning can be set by `OLLAMA_REASONING_EFFORT` and overridden in the playground. The API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use bearer authentication; registered keys remain limited to their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
@@ -305,6 +315,7 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local Ollama OpenAI-compatible API |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Exact locally installed model tag |
 | `OLLAMA_REASONING_EFFORT` | empty | Optional model-supported reasoning level; blank preserves the model default |
+| `TEMPERATURE` | `0.8` | Default chat sampling temperature (0-2); configurable in environment settings |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `150` | Character-based chunking; tune with evaluation |
 | `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one embedding request (also constrained by the estimated token budget) |
 | `RETRIEVAL_TOP_K` | `5` | Maximum retrieved chunks per request |

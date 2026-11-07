@@ -97,7 +97,13 @@ class RetrievalEvaluationCase(BaseModel):
         return list(dict.fromkeys(normalized))
 
 
-class RetrievalEvaluationRequest(BaseModel):
+class RequestOverrides(BaseModel):
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, strict=True)
+    retrieval_num_candidates: int | None = Field(default=None, ge=1, strict=True)
+    retrieval_min_score: float | None = Field(default=None, ge=0.0, le=1.0, strict=True)
+
+
+class RetrievalEvaluationRequest(RequestOverrides):
     model_config = ConfigDict(extra="forbid")
 
     tenant_id: str = Field(default="default", min_length=1, max_length=256)

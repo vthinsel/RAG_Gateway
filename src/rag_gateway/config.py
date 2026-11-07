@@ -37,8 +37,9 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=1024, ge=1)
     embedding_batch_size: int = Field(default=64, ge=1, le=128)
     ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen3.5:9b"
     ollama_reasoning_effort: str = Field(default="", max_length=64)
+    temperature: float = Field(default=0.8, ge=0.0, le=2.0)
     public_model_name: str = "rag-local"
     default_tenant_id: str = "default"
     chunk_size: int = Field(default=1200, ge=200)

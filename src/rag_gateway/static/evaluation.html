@@ -86,6 +86,20 @@
         <input id="token" type="password" autocomplete="off" required>
         <span class="note">Enter the actual GATEWAY_API_KEY secret value, not the text “GATEWAY_API_KEY”. Do not add the “Bearer ” prefix; the page adds it. Restart the gateway after changing its authentication configuration.</span>
       </div>
+      <div class="two">
+        <div class="field">
+          <label for="retrieval-num-candidates">Retrieval candidates</label>
+          <input id="retrieval-num-candidates" type="number" min="1" step="1" placeholder="Use configured default">
+        </div>
+        <div class="field">
+          <label for="retrieval-min-score">Minimum vector score</label>
+          <input id="retrieval-min-score" type="number" min="0" max="1" step="0.01" placeholder="Use configured default">
+        </div>
+      </div>
+      <div class="field">
+        <label for="temperature">Temperature (not used by retrieval)</label>
+        <input id="temperature" type="number" min="0" max="2" step="0.01" placeholder="Use configured default">
+      </div>
       <label class="checkbox-field" for="rerank-enabled">
         <input id="rerank-enabled" type="checkbox">
         Enable Atlas Native Reranking
@@ -130,6 +144,7 @@
     </section>
     <section aria-labelledby="metrics-title">
       <h2 id="metrics-title">Results</h2>
+      <p id="run-settings" class="note"></p>
       <div id="metrics" class="metrics" aria-live="polite">
         <div class="metric"><strong>—</strong><span>Run an evaluation to see metrics</span></div>
       </div>
@@ -180,6 +195,8 @@
 
     function renderResults(data) {
       const values = data.metrics;
+      document.querySelector("#run-settings").textContent =
+        `Candidates: ${data.retrieval_num_candidates ?? "Unknown"} | Minimum vector score: ${data.retrieval_min_score ?? "Unknown"} | Temperature: ${data.temperature ?? "Unknown"} (not used by retrieval)`;
       metrics.replaceChildren(
         metricCard("Cases", String(values.case_count)),
         metricCard("Reranking", optionLabel(data.rerank_enabled)),
@@ -211,6 +228,21 @@
 
     function optionLabel(enabled) {
       return enabled === true ? "On" : enabled === false ? "Off" : "Unknown";
+    }
+
+    function readOverrides() {
+      const overrides = {};
+      for (const [id, key] of [
+        ["temperature", "temperature"],
+        ["retrieval-num-candidates", "retrieval_num_candidates"],
+        ["retrieval-min-score", "retrieval_min_score"]
+      ]) {
+        const input = document.querySelector(`#${id}`);
+        if (!input.value.trim()) continue;
+        if (!input.checkValidity()) throw new Error(`Enter a valid ${input.labels[0].textContent.toLowerCase()}.`);
+        overrides[key] = Number(input.value);
+      }
+      return overrides;
     }
 
     function authHeaders() {
@@ -347,6 +379,7 @@
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
+            ...readOverrides(),
             tenant_id: document.querySelector("#tenant").value.trim(),
             top_k: Number(document.querySelector("#top-k").value),
             rerank_enabled: document.querySelector("#rerank-enabled").checked,

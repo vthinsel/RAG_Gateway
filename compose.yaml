@@ -36,6 +36,7 @@ services:
       OLLAMA_DOCKER_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://localhost:30068}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:9b}
       OLLAMA_REASONING_EFFORT: "none"
+      TEMPERATURE: ${TEMPERATURE:-0.8}
       PUBLIC_MODEL_NAME: rag-local
 
       # RAG

@@ -29,6 +29,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 from pymongo.errors import PyMongoError
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
@@ -54,6 +55,7 @@ from rag_gateway.models import (
     OllamaContextVariantRequest,
     OllamaCopyModelRequest,
     OllamaModelRequest,
+    RequestOverrides,
     RetrievalEvaluationRequest,
 )
 from rag_gateway.observability import ObservabilityMiddleware, request_metrics
@@ -439,6 +441,13 @@ def _requested_top_k(value: Any, default: int) -> int:
     if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 50:
         raise HTTPException(status_code=422, detail="top_k must be an integer between 1 and 50")
     return top_k
+
+
+def _requested_overrides(body: dict[str, Any]) -> RequestOverrides:
+    try:
+        return RequestOverrides.model_validate(body)
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 def _requested_rerank_enabled(value: Any) -> bool | None:
@@ -1600,6 +1609,7 @@ async def retrieve(
     top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
     rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
     hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
+    overrides = _requested_overrides(body)
     try:
         sources = await retrieve_context(
             query[: settings.max_query_chars],
@@ -1610,6 +1620,8 @@ async def retrieve(
             top_k,
             rerank_enabled,
             hybrid_enabled,
+            overrides.retrieval_num_candidates,
+            overrides.retrieval_min_score,
         )
     except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
@@ -1626,6 +1638,9 @@ async def evaluate_retrieval(
     embedder: VoyageEmbedder = Depends(get_embedder),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id(body.tenant_id, settings, allowed_tenants)
+    retrieval_overrides = body.model_dump(
+        include={"retrieval_num_candidates", "retrieval_min_score"}, exclude_none=True
+    )
     rerank_enabled = (
         settings.retrieval_rerank_enabled
         if body.rerank_enabled is None
@@ -1663,6 +1678,7 @@ async def evaluate_retrieval(
                 query=query,
                 rerank_enabled=rerank_enabled,
                 hybrid_enabled=hybrid_enabled,
+                **retrieval_overrides,
             )
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(
@@ -1704,6 +1720,15 @@ async def evaluate_retrieval(
         "rerank_enabled": rerank_enabled,
         "hybrid_enabled": hybrid_enabled,
         "run_name": run_name,
+        "temperature": settings.temperature if body.temperature is None else body.temperature,
+        "retrieval_num_candidates": (
+            settings.retrieval_num_candidates
+            if body.retrieval_num_candidates is None else body.retrieval_num_candidates
+        ),
+        "retrieval_min_score": (
+            settings.retrieval_min_score
+            if body.retrieval_min_score is None else body.retrieval_min_score
+        ),
         "metrics": {
             "case_count": case_count,
             "hit_rate_at_k": cases_with_hits / case_count,
@@ -1830,6 +1855,8 @@ def _chat_payload(body: dict[str, Any], messages: list[dict[str, Any]], settings
         "stream": bool(body.get("stream", False)),
     }
     payload.update({key: body[key] for key in forwarded_keys if key in body})
+    temperature = _requested_overrides(body).temperature
+    payload["temperature"] = settings.temperature if temperature is None else temperature
     if "reasoning_effort" in body:
         reasoning_effort = body["reasoning_effort"]
         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
@@ -1949,6 +1976,7 @@ async def chat_completions(
     if not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=422, detail="messages must be a non-empty array")
     query = extract_user_query(messages, settings.max_query_chars)
+    overrides = _requested_overrides(body)
     sources: list[dict[str, Any]] = []
     if query:
         tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
@@ -1965,6 +1993,8 @@ async def chat_completions(
                 top_k,
                 rerank_enabled,
                 hybrid_enabled,
+                overrides.retrieval_num_candidates,
+                overrides.retrieval_min_score,
             )
         except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
             raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error

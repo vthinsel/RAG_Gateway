@@ -31,6 +31,13 @@ def test_settings_response_redacts_secrets() -> None:
     assert "password" not in repr(response)
 
 
+def test_temperature_is_exposed_and_saved(tmp_path: Path) -> None:
+    settings = Settings(_env_file=None, temperature=0.35)
+    assert settings_response(settings)["settings"]["temperature"] == 0.35
+    env_file = save_settings(settings, tmp_path / ".env")
+    assert dotenv_values(env_file)["TEMPERATURE"] == "0.35"
+
+
 def test_save_settings_persists_values_and_preserves_unmanaged_lines(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

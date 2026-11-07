@@ -217,6 +217,18 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
     assert len(store.collection.pipeline) == 2
     assert [result["document_id"] for result in results] == ["high-score.md"]
 
+    overridden = store.search(
+        "tenant-a", [0.1, 0.2], limit=3,
+        retrieval_num_candidates=7, retrieval_min_score=0.0,
+    )
+    assert store.collection.pipeline[0]["$vectorSearch"]["numCandidates"] == 7
+    assert len(overridden) == 2
+    assert store.settings.retrieval_num_candidates == 50
+    assert store.settings.retrieval_min_score == 0.72
+
+    store.search("tenant-a", [0.1, 0.2], limit=3, retrieval_num_candidates=1)
+    assert store.collection.pipeline[0]["$vectorSearch"]["numCandidates"] == 3
+
 
 def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     class Collection:
@@ -759,6 +771,7 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
         api_key_registry={sha256(token.encode()).hexdigest(): ["tenant-a"]},
     )
     searches: list[tuple[str, int, bool | None, bool | None]] = []
+    overrides_seen: list[dict[str, Any]] = []
 
     class FakeStore:
         def search(
@@ -769,7 +782,9 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
             query: str | None = None,
             rerank_enabled: bool | None = None,
             hybrid_enabled: bool | None = None,
+            **overrides: Any,
         ) -> list[dict[str, Any]]:
+            overrides_seen.append(overrides)
             searches.append((tenant_id, limit, rerank_enabled, hybrid_enabled))
             if vector == [1.0]:
                 return [
@@ -813,6 +828,9 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
                     "top_k": 2,
                     "rerank_enabled": True,
                     "hybrid_enabled": True,
+                    "temperature": 0.0,
+                    "retrieval_num_candidates": 23,
+                    "retrieval_min_score": 0.0,
                     "cases": [
                         {
                             "query": "first question",
@@ -882,6 +900,16 @@ def test_retrieval_evaluation_reports_metrics_and_enforces_tenant_scope(
         assert 'id="hybrid-enabled" type="checkbox"' in page.text
         assert response.status_code == 200
         result = response.json()
+        assert result["temperature"] == 0.0
+        assert result["retrieval_num_candidates"] == 23
+        assert result["retrieval_min_score"] == 0.0
+        assert overrides_seen[:2] == [
+            {"retrieval_num_candidates": 23, "retrieval_min_score": 0.0},
+            {"retrieval_num_candidates": 23, "retrieval_min_score": 0.0},
+        ]
+        assert overrides_seen[2:] == [{}, {}, {}]
+        assert saved_run.json()["retrieval_num_candidates"] == 23
+        assert comparison_run_response.json()["temperature"] == settings.temperature
         assert run_id
         assert comparison_run_id
         assert comparison_run_response.status_code == 200
@@ -1002,6 +1030,7 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
     )
     searches: list[tuple[str, int, bool | None, bool | None]] = []
+    overrides_seen: list[dict[str, Any]] = []
     upstream_payloads: list[dict[str, Any]] = []
 
     class FakeStore:
@@ -1013,7 +1042,9 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
             query: str | None = None,
             rerank_enabled: bool | None = None,
             hybrid_enabled: bool | None = None,
+            **overrides: Any,
         ) -> list[dict[str, Any]]:
+            overrides_seen.append(overrides)
             searches.append((tenant_id, limit, rerank_enabled, hybrid_enabled))
             return [
                 {
@@ -1085,6 +1116,9 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                         "rerank_enabled": False,
                         "hybrid_enabled": True,
                         "reasoning_effort": "high",
+                        "temperature": 0.0,
+                        "retrieval_num_candidates": 25,
+                        "retrieval_min_score": 0.6,
                     },
                 )
                 tenant_scope_response = client.post(
@@ -1102,6 +1136,15 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
                         "X-Tenant-ID": "tenant-b",
                     },
                     json={"query": "When does it open?", "top_k": 51},
+                )
+                retrieval_response = client.post(
+                    "/v1/retrieve",
+                    headers={"Authorization": "Bearer playground-admin-key"},
+                    json={
+                        "query": "When does it open?",
+                        "retrieval_num_candidates": 12,
+                        "retrieval_min_score": 0.0,
+                    },
                 )
             finally:
                 import asyncio
@@ -1134,7 +1177,15 @@ def test_playground_chat_accepts_gateway_admin_key_and_requested_top_k(
         assert response.json()["sources"][0]["lexical_score"] == 8.4
         assert response.json()["sources"][0]["rerank_score"] == 0.95
         assert upstream_payloads[0]["reasoning_effort"] == "high"
-        assert searches == [("tenant-b", 2, False, True)]
+        assert upstream_payloads[0]["temperature"] == 0.0
+        assert "retrieval_num_candidates" not in upstream_payloads[0]
+        assert "retrieval_min_score" not in upstream_payloads[0]
+        assert overrides_seen == [
+            {"retrieval_num_candidates": 25, "retrieval_min_score": 0.6},
+            {"retrieval_num_candidates": 12, "retrieval_min_score": 0.0},
+        ]
+        assert retrieval_response.status_code == 200
+        assert searches == [("tenant-b", 2, False, True), ("default", 5, None, None)]
         assert "The example greenhouse opens at 08:00." in upstream_payloads[0]["messages"][-1]["content"]
     finally:
         app.dependency_overrides.pop(get_settings, None)
@@ -1223,6 +1274,27 @@ def test_chat_payload_uses_configured_reasoning_effort_and_request_override() ->
     assert configured["reasoning_effort"] == "low"
     assert overridden["reasoning_effort"] == "high"
     assert "reasoning_effort" not in model_default
+
+
+def test_chat_payload_uses_temperature_default_and_override() -> None:
+    settings = Settings(_env_file=None, temperature=0.4)
+    assert main._chat_payload({}, [], settings)["temperature"] == 0.4
+    assert main._chat_payload({"temperature": None}, [], settings)["temperature"] == 0.4
+    assert main._chat_payload({"temperature": 0.0}, [], settings)["temperature"] == 0.0
+
+
+@pytest.mark.parametrize("body", [
+    {"temperature": -0.1}, {"temperature": 2.1}, {"temperature": True},
+    {"temperature": float("nan")},
+    {"retrieval_num_candidates": 0}, {"retrieval_num_candidates": 1.5},
+    {"retrieval_num_candidates": True}, {"retrieval_num_candidates": "10"},
+    {"retrieval_min_score": -0.1}, {"retrieval_min_score": 1.1},
+    {"retrieval_min_score": True}, {"retrieval_min_score": float("inf")},
+])
+def test_request_overrides_reject_invalid_values(body: dict[str, Any]) -> None:
+    with pytest.raises(main.HTTPException) as error:
+        main._requested_overrides(body)
+    assert error.value.status_code == 422
 
 
 def test_ollama_api_chat_adapts_streaming_response(monkeypatch: pytest.MonkeyPatch) -> None:
