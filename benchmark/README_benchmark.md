@@ -247,8 +247,6 @@ distant, son support des options de génération ni la qualité réelle des rép
 
 Quelle VM héberge la RAG Gateway dans le dernier état validé du corpus ?
 
-Attendu : VM 106 docker, 192.168.2.21, déploiement validé le 30/10/2026.
-
 Sources : 26-rag-gateway-validation.md
 
 Contrôle : Rejeter NAS, xeon et migration encore à faire comme état final.
@@ -257,15 +255,11 @@ Contrôle : Rejeter NAS, xeon et migration encore à faire comme état final.
 
 Quelle est l’adresse IP du NAS nas01 ?
 
-Attendu : 192.168.2.16.
-
 Sources : 01-architecture.md
 
 ### HL-03 — lexical
 
 Quels sous-réseau et passerelle sont associés au VLAN Guest 2 ?
-
-Attendu : 192.168.5.0/24 ; passerelle 192.168.5.1.
 
 Sources : 02-network-vlans.md
 
@@ -273,15 +267,11 @@ Sources : 02-network-vlans.md
 
 Quel SSID est limité à la bande 2,4 GHz ?
 
-Attendu : thinselinIoT.
-
 Sources : 02-network-vlans.md
 
 ### HL-05 — lexical
 
 Vers quelle adresse pointe nfsdocker et pourquoi son type DNS a-t-il changé ?
-
-Attendu : Enregistrement A vers 192.168.2.16, pour corriger une boucle CNAME.
 
 Sources : 03-dns-naming.md
 
@@ -289,15 +279,11 @@ Sources : 03-dns-naming.md
 
 Quel service résout encore les anciens noms se terminant par thinselin.local ?
 
-Attendu : AdGuard à 192.168.2.14, via délégation/forwarding du domaine historique.
-
 Sources : 03-dns-naming.md
 
 ### HL-07 — factuel
 
 Quel nom HTTPS permet d’accéder à la Gateway depuis le LAN ?
-
-Attendu : https://rag.home.thinselin.net via Traefik.
 
 Sources : 26-rag-gateway-validation.md
 
@@ -305,15 +291,11 @@ Sources : 26-rag-gateway-validation.md
 
 Quels entrypoint et certresolver Traefik ont été validés pour la Gateway ?
 
-Attendu : Entrypoint web-secure ; certresolver ovh.
-
 Sources : 26-rag-gateway-validation.md
 
 ### HL-09 — lexical
 
 Quel bind mount contient les données actives d’Open WebUI dans le relevé du 25 octobre ?
-
-Attendu : /var/snap/docker/common/open-webui/data vers /app/backend/data.
 
 Sources : 08-storage-nfs.md
 
@@ -321,23 +303,17 @@ Sources : 08-storage-nfs.md
 
 La base SQLite d’Open WebUI utilise-t-elle directement un montage NFS ?
 
-Attendu : Non : bind mount sur ext4 dans la VM ; le disque virtuel de cette VM reste stocké sur NFS côté Proxmox.
-
 Sources : 08-storage-nfs.md
 
 ### HL-11 — synthese
 
 Si le NAS tombe, la Gateway hébergée sur la VM Docker reste-t-elle forcément utilisable ?
 
-Attendu : Non : génération Ollama dépend du NAS et le disque de la VM dépend aussi du stockage NFS du NAS.
-
 Sources : 08-storage-nfs.md, 25-rag-gateway-exploitation.md, 26-rag-gateway-validation.md
 
 ### HL-12 — chronologie
 
 La Gateway est-elle encore seulement prévue sur la VM, ou son déploiement est-il validé ?
-
-Attendu : Validé le 30/10/2026 ; les mentions de migration non confirmée sont supplantées par la mise à jour opérationnelle et le document 26.
 
 Sources : 26-rag-gateway-validation.md
 
@@ -347,15 +323,11 @@ Contrôle : Tester les contradictions intra-document et inter-documents.
 
 Quel GPU est documenté sur le NAS dans l’état le plus récent de ce corpus ?
 
-Attendu : RTX 3060 12 Go/GiB selon V13 du 28/10 ; RTX 2060 6 Go correspond à un état historique. Revalidation live nécessaire pour l’état présent.
-
 Sources : 10-ollama-gpu-tuning.md
 
 ### HL-14 — premisse_fausse
 
 Sur quel port est raccordé le switch UniFi Flex 2.5G PoE installé dans le homelab ?
-
-Attendu : La prémisse est fausse : le Flex a été envisagé mais n’est pas installé selon le corpus ; aucun port ne doit être inventé.
 
 Sources : 01-architecture.md
 
@@ -363,15 +335,11 @@ Sources : 01-architecture.md
 
 Le kill switch garantit-il que le Wi-Fi Guest ne sort jamais par Free ?
 
-Attendu : Non : fuite vers le WAN lors de la désactivation manuelle du VPN ; échec d’authentification VPN bloque en revanche le trafic.
-
 Sources : 04-vpn-guest-incident.md
 
 ### HL-16 — synthese
 
 Pourquoi un test Guest avec de mauvais identifiants VPN ne suffit-il pas à valider le kill switch ?
-
-Attendu : Le comportement diffère entre échec d’authentification et arrêt administratif : ce dernier laisse sortir via WAN. IPv6 et DNS doivent aussi être testés séparément.
 
 Sources : 04-vpn-guest-incident.md
 
@@ -379,15 +347,11 @@ Sources : 04-vpn-guest-incident.md
 
 Depuis Hermes sur le NAS, peut-on employer le même nom rag-gateway que depuis Open WebUI ?
 
-Attendu : Non : alias du réseau Docker traefik-net de la VM ; Hermes doit passer par un endpoint joignable, notamment HTTPS Traefik.
-
 Sources : 24-architecture-ia-rag.md, 26-rag-gateway-validation.md
 
 ### HL-18 — synthese
 
 Quelles parties du RAG tournent sur la VM, sur le NAS et dans le cloud ?
-
-Attendu : VM 106 : Gateway et Open WebUI/Traefik ; NAS : Ollama, génération GPU et Hermes ; cloud : Atlas chunks/recherche et AI Model APIs/Voyage pour embeddings.
 
 Sources : 24-architecture-ia-rag.md, 26-rag-gateway-validation.md
 
@@ -395,15 +359,11 @@ Sources : 24-architecture-ia-rag.md, 26-rag-gateway-validation.md
 
 La réponse citée dans le playground prouve-t-elle que les outils MCP Home Assistant fonctionnent via Hermes ?
 
-Attendu : Non : le test RAG ne valide pas le raccordement Hermes ni les permissions et appels MCP Home Assistant.
-
 Sources : 12-homeassistant-mcp.md, 26-rag-gateway-validation.md
 
 ### HL-20 — lexical
 
 Quel outil a été demandé à Hermes pour consulter les pièces et étages Home Assistant ?
-
-Attendu : ha_list_floors_areas ; essai observé, exécution finale non établie dans ce corpus.
 
 Sources : 12-homeassistant-mcp.md
 
@@ -411,15 +371,11 @@ Sources : 12-homeassistant-mcp.md
 
 Quelle correction est documentée pour stack.env not found dans Portainer ?
 
-Attendu : Supprimer env_file: stack.env et transmettre les variables par environment: avec substitution depuis les variables de stack Portainer.
-
 Sources : 26-rag-gateway-validation.md
 
 ### HL-22 — diagnostic
 
 Pourquoi une clé Atlas AI Model APIs provoquait-elle un 401 lors des embeddings Voyage ?
-
-Attendu : Clé Atlas utilisée contre api.voyageai.com ; employer le domaine Atlas AI Model APIs correspondant à la géographie de la clé, par exemple ai.mongodb.com pour une clé globale.
 
 Sources : 26-rag-gateway-validation.md
 
@@ -427,15 +383,11 @@ Sources : 26-rag-gateway-validation.md
 
 Combien de RK1 équipent la Turing Pi 2 et comment les rôles MongoDB sont-ils répartis ?
 
-Attendu : 4 RK1 : 3 nœuds de données et 1 gestion/monitoring.
-
 Sources : 13-rk1-cluster.md
 
 ### HL-24 — lexical
 
 Quelle version du noyau personnalisé THP a été validée sur RK1 ?
-
-Attendu : 5.10.160-rockchip-thp1.
 
 Sources : 14-rk1-kernel-thp.md
 
@@ -443,15 +395,11 @@ Sources : 14-rk1-kernel-thp.md
 
 La présence de madvise dans la liste sysfs prouve-t-elle que CONFIG_TRANSPARENT_HUGEPAGE_MADVISE est activé ?
 
-Attendu : Non : symbole non activé dans le relevé ; défaut ALWAYS, sysfs [always] madvise never.
-
 Sources : 14-rk1-kernel-thp.md
 
 ### HL-26 — interpretation
 
 Quel gain de débit THP est documenté, et dans quelles conditions ?
-
-Attendu : Petit dataset : environ 0,3 % d’écart ; grand dataset sous pression du cache WiredTiger : gain jusqu’à 7,1 % dans certains scénarios, pas un gain universel.
 
 Sources : 15-mongodb-arm-bench.md
 
@@ -459,15 +407,11 @@ Sources : 15-mongodb-arm-bench.md
 
 Quel est le gain moyen consolidé de MongoDB 9 par rapport à MongoDB 8 sur les RK1 ?
 
-Attendu : Impossible à déterminer : résultats consolidés et CSV bruts absents de la synthèse.
-
 Sources : 15-mongodb-arm-bench.md
 
 ### HL-28 — abstention
 
 Quelle est la température actuelle du GPU du NAS ?
-
-Attendu : Impossible à connaître depuis ce corpus statique ; une mesure live est nécessaire. Ne pas recycler une température historique.
 
 Sources : 00-start-here.md, 10-ollama-gpu-tuning.md
 
@@ -475,15 +419,11 @@ Sources : 00-start-here.md, 10-ollama-gpu-tuning.md
 
 Quelle est l’URL exacte authentifiée du serveur MCP Home Assistant et son jeton ?
 
-Attendu : Endpoint exact non établi dans le corpus ; aucun jeton fourni et aucune valeur ne doit être inventée.
-
 Sources : 12-homeassistant-mcp.md
 
 ### HL-30 — limite_preuve
 
 La présence d’une allowlist Traefik suffit-elle à prouver que toutes les routes de la Gateway sont protégées ?
-
-Attendu : Non : allowlist documentée pour LAN/WireGuard/Teleport, mais authentification par route et absence de chemins WAN doivent être vérifiées séparément.
 
 Sources : 26-rag-gateway-validation.md
 
@@ -491,15 +431,11 @@ Sources : 26-rag-gateway-validation.md
 
 Where does the RAG Gateway run, and where is answer generation performed?
 
-Attendu : Gateway on Docker VM 106, 192.168.2.21; answer generation through Ollama on NAS 192.168.2.16:30068.
-
 Sources : 26-rag-gateway-validation.md
 
 ### HL-32 — multilingue
 
 Which kernel release enabled Transparent Huge Pages on the RK1 nodes?
-
-Attendu : 5.10.160-rockchip-thp1; avoid claiming deployment on every node is proven.
 
 Sources : 14-rk1-kernel-thp.md
 
@@ -513,8 +449,6 @@ Le manifeste inclut le document 27 sur le HomeLab AI Control Center. La question
 ### HL-33 — factuel
 
 Sur quelle VM le HomeLab AI Control Center est-il hébergé, et comment son interface web est-elle exposée ?
-
-Attendu : VM Docker 106 (`192.168.2.21`). Le frontend écoute sur `127.0.0.1:8080` et l’interface doit rester accessible par le réseau privé ou le reverse proxy, sans publication directe sur Internet. Les seules sondes de santé ne valident pas le trafic de bout en bout.
 
 Sources : 27-homelab-ai-control-center.md
 
