@@ -4,8 +4,9 @@ import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -20,6 +21,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger("uvicorn.error")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_request_scope: ContextVar[Scope | None] = ContextVar("request_scope", default=None)
 
 
 class RequestEvent(TypedDict):
@@ -146,7 +148,7 @@ class RequestMetrics:
                     "status": "in progress",
                     "duration_ms": round((now - started) * 1000, 2),
                     "outcome": "in progress",
-                    "details": deepcopy(scope.get("state", {}).get("diagnostics", {})),
+                    "details": _snapshot_details(scope, now),
                 }
             )
         total_requests = sum(count for _, count in requests)
@@ -213,6 +215,19 @@ class RequestMetrics:
         return "\n".join(lines) + "\n"
 
 
+def _snapshot_details(scope: Scope, now: float) -> dict[str, Any]:
+    state = scope.get("state", {})
+    with state.get("timing_lock", nullcontext()):
+        details = deepcopy(state.get("diagnostics", {}))
+        stack = state.get("timing_stack", [])
+        if stack:
+            details["active_stage"] = {
+                "name": stack[-1]["name"],
+                "elapsed_ms": round(max(0, now - stack[-1]["started"]) * 1000, 2),
+            }
+    return details
+
+
 def _label(value: str) -> str:
     return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
@@ -258,16 +273,44 @@ def record_request_error(scope: Scope, error: Exception, status: int) -> None:
     diagnostics["error"] = failure
 
 
-@asynccontextmanager
-async def request_stage(scope: Scope | None, stage: str) -> AsyncIterator[None]:
-    diagnostics = scope.setdefault("state", {}).setdefault("diagnostics", {}) if scope else {}
-    diagnostics["stage"] = stage
-    started = time.perf_counter()
+@contextmanager
+def processing_stage(stage: str) -> Iterator[None]:
+    with _measure_stage(_request_scope.get(), stage):
+        yield
+
+
+@contextmanager
+def _measure_stage(scope: Scope | None, stage: str) -> Iterator[None]:
+    state = scope.setdefault("state", {}) if scope is not None else {}
+    lock = state.setdefault("timing_lock", threading.RLock())
+    with lock:
+        diagnostics = state.setdefault("diagnostics", {})
+        diagnostics["stage"] = stage
+        started = time.perf_counter()
+        stack = state.setdefault("timing_stack", [])
+        frame = {"name": stage, "started": started}
+        stack.append(frame)
+    failed = False
     try:
         yield
+    except BaseException:
+        failed = True
+        raise
     finally:
-        timings = diagnostics.setdefault("stage_durations_ms", {})
-        timings[stage] = round(timings.get(stage, 0) + (time.perf_counter() - started) * 1000, 2)
+        with lock:
+            timings = diagnostics.setdefault("stage_durations_ms", {})
+            timings[stage] = round(timings.get(stage, 0) + (time.perf_counter() - started) * 1000, 2)
+            counts = diagnostics.setdefault("stage_counts", {})
+            counts[stage] = counts.get(stage, 0) + 1
+            stack.remove(frame)
+            if not failed and stack:
+                diagnostics["stage"] = stack[-1]["name"]
+
+
+@asynccontextmanager
+async def request_stage(scope: Scope | None, stage: str) -> AsyncIterator[None]:
+    with _measure_stage(scope, stage):
+        yield
 
 
 class ObservabilityMiddleware:
@@ -287,6 +330,7 @@ class ObservabilityMiddleware:
         state = scope.setdefault("state", {})
         state["request_id"] = request_id
         state["diagnostics"] = {"stage": "routing"}
+        scope_token = _request_scope.set(scope)
         response_bytes = 0
         request_metrics.begin(request_id, scope["method"], scope)
 
@@ -341,3 +385,4 @@ class ObservabilityMiddleware:
                         separators=(",", ":"),
                     )
                 )
+            _request_scope.reset(scope_token)

@@ -7,6 +7,7 @@ from typing import Any
 from pymongo import MongoClient, ReplaceOne
 
 from rag_gateway.config import Settings
+from rag_gateway.observability import processing_stage
 
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
@@ -304,7 +305,8 @@ class AtlasStore:
                     {"$addFields": {"rerank_score": {"$meta": "score"}}},
                 ]
             )
-        vector_candidates = list(self.collection.aggregate(pipeline))
+        with processing_stage("atlas_vector_rerank" if rerank_enabled else "atlas_vector"):
+            vector_candidates = list(self.collection.aggregate(pipeline))
         if hybrid_enabled:
             lexical_pipeline = [
                 {
@@ -330,7 +332,8 @@ class AtlasStore:
                     }
                 },
             ]
-            lexical_candidates = list(self.collection.aggregate(lexical_pipeline))
+            with processing_stage("atlas_lexical"):
+                lexical_candidates = list(self.collection.aggregate(lexical_pipeline))
             fused: dict[Any, dict[str, Any]] = {}
             for candidates, score_field in (
                 (vector_candidates, "vector_score"),

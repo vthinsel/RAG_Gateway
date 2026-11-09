@@ -2,7 +2,10 @@ import re
 import secrets
 from typing import Any
 
+from starlette.concurrency import run_in_threadpool
+
 from rag_gateway.config import Settings
+from rag_gateway.observability import processing_stage
 from rag_gateway.store import AtlasStore
 from rag_gateway.voyage import VoyageEmbedder
 
@@ -27,7 +30,8 @@ async def retrieve_context(
     retrieval_num_candidates: int | None = None,
     retrieval_min_score: float | None = None,
 ) -> list[dict[str, Any]]:
-    query_vector = (await embedder.embed([query], input_type="query"))[0]
+    with processing_stage("embedding"):
+        query_vector = (await embedder.embed([query], input_type="query"))[0]
     search_options: dict[str, Any] = {}
     if rerank_enabled is not None:
         search_options["rerank_enabled"] = rerank_enabled
@@ -37,7 +41,8 @@ async def retrieve_context(
         search_options["retrieval_num_candidates"] = retrieval_num_candidates
     if retrieval_min_score is not None:
         search_options["retrieval_min_score"] = retrieval_min_score
-    return store.search(
+    return await run_in_threadpool(
+        store.search,
         tenant_id,
         query_vector,
         top_k if top_k is not None else settings.retrieval_top_k,

@@ -44,6 +44,18 @@
     .table-wrap { overflow-x: auto; }
     .filters { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 12px; margin: 12px 0; }
     .processing { min-width: 250px; max-width: 480px; overflow-wrap: anywhere; }
+    .timing-chart { width: 340px; max-width: 100%; margin: 0 0 10px; }
+    .timing-caption { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 5px; font-size: 12px; font-weight: 650; }
+    .timing-bar { display: flex; width: 100%; height: 14px; overflow: hidden; background: #e5e9e7; border-radius: 2px; }
+    .timing-segment { height: 100%; flex: 0 0 auto; }
+    .timing-segment.active { opacity: .65; border-top: 2px dashed #fff; }
+    .timing-legend { display: grid; gap: 3px; margin-top: 7px; }
+    .timing-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 6px; align-items: baseline; font-size: 11px; }
+    .timing-swatch { width: 9px; height: 9px; align-self: center; border-radius: 1px; }
+    .timing-value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+    .timing-row.active .timing-value { color: #735a11; font-weight: 700; }
+    .timing-note { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+    .case-timings { display: grid; gap: 12px; margin-top: 12px; }
     details summary { color: var(--green); cursor: pointer; }
     details pre { max-width: 480px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
     .request-id { overflow-wrap: anywhere; max-width: 160px; }
@@ -159,6 +171,102 @@
       return item;
     }
 
+    function formatDuration(value) {
+      return value < 1000 ? `${value.toFixed(2)} ms` : `${(value / 1000).toFixed(2)} s`;
+    }
+
+    function queryTiming(item) {
+      const info = item.details || {};
+      const timings = info.stage_durations_ms || {};
+      const active = info.active_stage || {};
+      const options = info.retrieval_options || {};
+      const has = key => Number.isFinite(timings[key]) || active.name === key;
+      const duration = key => Math.max(0, Number(timings[key]) || 0)
+        + (active.name === key ? Math.max(0, Number(active.elapsed_ms) || 0) : 0);
+      const fineRetrieval = ["embedding", "atlas_vector", "atlas_vector_rerank", "atlas_lexical"].some(has);
+      const ollamaKey = ["ollama_stream", "ollama", "ollama_admin"].find(has) || (info.stream ? "ollama_stream" : "ollama");
+      if (!fineRetrieval && !has("retrieval") && !has(ollamaKey)) return null;
+      const rows = [];
+      const pending = item.status === "in progress" ? "Pending" : "Not reached";
+      function add(key, label, color, unavailable = pending) {
+        rows.push({ key, label, color, duration: has(key) ? duration(key) : null,
+          active: active.name === key, unavailable });
+      }
+      const bundledRerank = has("atlas_vector_rerank") || options.rerank_enabled === true;
+      if (fineRetrieval) {
+        add("embedding", "Embedding", "#087f8c");
+        add(bundledRerank ? "atlas_vector_rerank" : "atlas_vector",
+          bundledRerank ? "Vector + rerank" : "Atlas vector search", "#3969b0");
+        add("atlas_lexical", "Lexical search", "#2d7d46", options.hybrid_enabled === false ? "Not enabled" : pending);
+        rows.push({ key: "reranking", label: "Reranking", color: "#b36a1c", duration: null,
+          unavailable: bundledRerank ? "Included in vector call" : "Not enabled" });
+      } else if (has("retrieval")) {
+        add("retrieval", "Retrieval (combined)", "#3969b0");
+      }
+      const retrievalOnly = item.route === "/v1/retrieve" || item.route === "/v1/evaluations/retrieval";
+      add(ollamaKey, "Ollama", "#965a81", retrievalOnly ? "Not requested" : pending);
+      const measured = rows.reduce((total, row) => total + (row.duration || 0), 0);
+      const total = Math.max(0, Number(item.duration_ms) || 0, measured);
+      rows.push({ key: "other", label: "Other / app", color: "#8d969b",
+        duration: Math.max(0, total - measured), active: false });
+      return { rows, total, bundledRerank };
+    }
+
+    function renderTiming(item, label = "") {
+      const timing = queryTiming(item);
+      if (!timing) return null;
+      const figure = document.createElement("figure");
+      figure.className = "timing-chart";
+      const caption = document.createElement("figcaption");
+      caption.className = "timing-caption";
+      const title = document.createElement("span");
+      const heading = label || (item.details?.case_count ? "Batch time" : "Query time");
+      title.textContent = item.status === "in progress" ? `${heading} · in flight` : heading;
+      const elapsed = document.createElement("span");
+      elapsed.textContent = formatDuration(Math.max(0, Number(item.duration_ms) || 0));
+      caption.append(title, elapsed);
+      const bar = document.createElement("div");
+      bar.className = "timing-bar";
+      bar.setAttribute("role", "img");
+      const legend = document.createElement("div");
+      legend.className = "timing-legend";
+      const descriptions = [];
+      for (const stage of timing.rows) {
+        const row = document.createElement("div");
+        row.className = `timing-row${stage.active ? " active" : ""}`;
+        row.dataset.stage = stage.key;
+        const swatch = document.createElement("span");
+        swatch.className = "timing-swatch";
+        swatch.style.backgroundColor = stage.color;
+        swatch.setAttribute("aria-hidden", "true");
+        const label = document.createElement("span");
+        label.textContent = stage.label;
+        const value = document.createElement("span");
+        value.className = "timing-value";
+        if (stage.duration === null) {
+          value.textContent = stage.unavailable;
+        } else {
+          const percentage = timing.total > 0 ? stage.duration / timing.total * 100 : 0;
+          value.textContent = `${formatDuration(stage.duration)} · ${percentage.toFixed(1)}%${stage.active ? " · running" : ""}`;
+          if (stage.duration > 0) {
+            const segment = document.createElement("span");
+            segment.className = `timing-segment${stage.active ? " active" : ""}`;
+            segment.dataset.stage = stage.key;
+            segment.style.width = `${percentage}%`;
+            segment.style.backgroundColor = stage.color;
+            segment.title = `${stage.label}: ${value.textContent}`;
+            bar.append(segment);
+          }
+        }
+        descriptions.push(`${stage.label}: ${value.textContent}`);
+        row.append(swatch, label, value);
+        legend.append(row);
+      }
+      bar.setAttribute("aria-label", descriptions.join("; "));
+      figure.append(caption, bar, legend);
+      return figure;
+    }
+
     function renderRequests(items) {
       latestRequests = items;
       const expanded = new Set([...requestRows.querySelectorAll("details[open]")].map(item => item.dataset.requestId));
@@ -193,6 +301,8 @@
         cell(row, `${Number(item.duration_ms).toFixed(2)} ms`);
         cell(row, item.request_id, "request-id");
         const processing = cell(row, "", "processing");
+        const timing = renderTiming(item);
+        if (timing) processing.append(timing);
         const details = document.createElement("details");
         details.dataset.requestId = item.request_id;
         details.open = expanded.has(item.request_id);
@@ -209,7 +319,22 @@
         }
         summary.textContent = facts.join(" · ");
         content.textContent = JSON.stringify(info, null, 2);
-        details.append(summary, content);
+        const caseCharts = document.createElement("div");
+        caseCharts.className = "case-timings";
+        function showCases() {
+          if (!details.open || caseCharts.childElementCount) return;
+          for (const entry of info.case_timings || []) {
+            const chart = renderTiming({
+              route: item.route, status: entry.status === "error" ? 502 : 200,
+              duration_ms: entry.duration_ms,
+              details: { stage_durations_ms: entry.stage_durations_ms, retrieval_options: info.retrieval_options }
+            }, `Case ${entry.case_index}${entry.status === "error" ? " · failed" : ""}`);
+            if (chart) caseCharts.append(chart);
+          }
+        }
+        details.addEventListener("toggle", showCases);
+        details.append(summary, caseCharts, content);
+        showCases();
         processing.append(details);
       }
     }

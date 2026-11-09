@@ -63,6 +63,7 @@ from rag_gateway.models import (
 )
 from rag_gateway.observability import (
     ObservabilityMiddleware,
+    processing_stage,
     record_request_error,
     request_metrics,
     request_stage,
@@ -1700,7 +1701,7 @@ async def evaluate_retrieval(
     tenant_id = get_tenant_id(body.tenant_id, settings, allowed_tenants)
     diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
     diagnostics.update({"retrieval_options": _retrieval_diagnostics(body.model_dump(), settings),
-                        "case_count": len(body.cases), "cases_completed": 0})
+                        "case_count": len(body.cases), "cases_completed": 0, "case_timings": []})
     retrieval_overrides = body.model_dump(
         include={"retrieval_num_candidates", "retrieval_min_score"}, exclude_none=True
     )
@@ -1731,9 +1732,13 @@ async def evaluate_retrieval(
         expected = set(case.expected_document_ids)
         expected_document_count += len(expected)
         started_at = asyncio.get_running_loop().time()
+        previous_timings = dict(diagnostics.get("stage_durations_ms", {}))
+        previous_stage_counts = dict(diagnostics.get("stage_counts", {}))
+        case_completed = False
         try:
             async with request_stage(request.scope, "retrieval"):
-                vector = (await embedder.embed([query], input_type="query"))[0]
+                with processing_stage("embedding"):
+                    vector = (await embedder.embed([query], input_type="query"))[0]
                 sources = await run_in_threadpool(
                     store.search,
                     tenant_id,
@@ -1744,11 +1749,23 @@ async def evaluate_retrieval(
                     hybrid_enabled=hybrid_enabled,
                     **retrieval_overrides,
                 )
+            case_completed = True
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(
                 status_code=502,
                 detail=f"Retrieval evaluation failed: {type(error).__name__}",
             ) from error
+        finally:
+            diagnostics["case_timings"].append({
+                "case_index": len(diagnostics["case_timings"]) + 1,
+                "status": "success" if case_completed else "error",
+                "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 2),
+                "stage_durations_ms": {
+                    key: round(value - previous_timings.get(key, 0), 2)
+                    for key, value in diagnostics.get("stage_durations_ms", {}).items()
+                    if diagnostics.get("stage_counts", {}).get(key, 0) > previous_stage_counts.get(key, 0)
+                },
+            })
         latency_ms = (asyncio.get_running_loop().time() - started_at) * 1000
         diagnostics["cases_completed"] += 1
         latency_sum += latency_ms

@@ -304,8 +304,29 @@ A stream can fail after HTTP 200 has already been sent. Such calls retain their
 actual HTTP status but have `outcome=error`, appear as stream errors in the live
 monitor, and count toward its failed-request and per-route error totals.
 Prometheus HTTP status counters continue to reflect the actual transport status.
-Stage timings cover Gateway operations, not separately measured Atlas execution
-or GPU inference time. Missing usage/stage fields are unavailable, not zero.
+Each query has a stacked time-contribution chart in the live monitor, with stage
+durations, percentages and the current stage's elapsed time. Embedding, Atlas
+vector search, lexical search and Ollama are measured independently. Native
+Atlas `$rerank` executes inside the vector aggregation, so its client-visible
+duration is shown as **Vector + rerank**; reranking is explicitly marked as
+included, not given an invented independent duration. No extra search or explain
+requests are issued to estimate a split.
+
+These are Gateway-observed wall-clock durations: embedding includes the embedding
+API call; Atlas timings include aggregation and cursor consumption; Ollama includes
+network transfer and, for streams, response delivery/backpressure. They are not
+database-internal execution or pure GPU inference measurements. The enclosing
+`retrieval` total remains in the raw details but is excluded from the chart when
+its child stages are available, preventing double counting. **Other / app** covers
+the remaining request time, including scheduling, fusion, serialization and
+unattributed work. Disabled, pending and unreached stages are labeled separately
+from measured zero-duration stages. Missing fields are unavailable, not zero.
+
+Batch retrieval evaluations show a batch overview and individual case charts in
+expanded processing details, including partial timings for failed cases. Case
+numbers are retained without copying question text or document content into
+request telemetry. Fine-grained Atlas work runs in a worker thread so status
+polling remains responsive while a query is waiting for MongoDB.
 
 Example ingestion body:
 
