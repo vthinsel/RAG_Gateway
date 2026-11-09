@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -718,12 +719,127 @@ async def test_lifespan_starts_when_optional_integrations_are_unavailable(
         async with main.lifespan(main.app):
             assert await main.health() == {"status": "ok"}
             await main.app.state.integration_task
-            assert main.app.state.store is None
+            assert isinstance(main.app.state.store, UnavailableStore)
             assert main.app.state.atlas_status == "unavailable"
 
     assert "Atlas store initialization failed" in caplog.text
     assert "MongoDB AI API model check failed" in caplog.text
     assert "Ollama model discovery failed" in caplog.text
+
+
+@pytest.mark.parametrize("fail_constructor", [True, False])
+@pytest.mark.parametrize("refresh_endpoint", ["/v1/status", "/readyz"])
+async def test_mongodb_recovers_after_startup_without_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_constructor: bool,
+    refresh_endpoint: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        mongodb_uri="mongodb://atlas.test",
+        mongodb_api_key="test-embedding-key",
+        gateway_api_key="test-gateway-key",
+        operations_db_path=tmp_path / "operations.sqlite3",
+    )
+    online = False
+    stores = []
+
+    class RecoveringStore:
+        def __init__(self, _settings: Settings) -> None:
+            if fail_constructor and not online:
+                raise PyMongoError("Cluster is offline during index creation")
+            self.closed = False
+            stores.append(self)
+
+        def ping(self) -> bool:
+            if not online:
+                raise PyMongoError("Cluster is offline")
+            return True
+
+        def vector_index_status(self) -> tuple[bool, bool]:
+            return True, True
+
+        def list_tenant_ids(self) -> list[str]:
+            return ["default"]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return [settings.ollama_model]
+
+        def close(self) -> None:
+            pass
+
+    async def skip_embedding_check(*_args: Any) -> None:
+        pass
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setattr(main, "AtlasStore", RecoveringStore)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setattr(main, "_check_mongodb_ai_model_api", skip_embedding_check)
+
+    async with main.lifespan(main.app):
+        await main.app.state.integration_task
+        assert main.app.state.atlas_status == "unavailable"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+        ) as client:
+            unavailable = await client.get(refresh_endpoint)
+            assert unavailable.json()["status"] == "not_ready"
+            online = True
+            recovered, concurrent_refresh, concurrent_readiness = await asyncio.gather(
+                client.get(refresh_endpoint),
+                client.get(refresh_endpoint),
+                client.get("/readyz"),
+            )
+            assert recovered.status_code == 200
+            assert recovered.json()["status"] == "ready"
+            assert concurrent_refresh.json()["status"] == "ready"
+            assert concurrent_readiness.status_code == 200
+            assert main.app.state.atlas_status == "connected"
+            assert len(stores) == 1
+            assert main.app.state.store is stores[0]
+            assert not stores[0].closed
+            request = main.Request({"type": "http", "app": main.app})
+            assert main.get_store(request) is stores[0]
+            online = False
+            failed_again = await client.get(refresh_endpoint)
+            assert failed_again.json()["status"] == "not_ready"
+            online = True
+            recovered_again = await client.get(refresh_endpoint)
+            assert recovered_again.json()["status"] == "ready"
+            assert len(stores) == 1
+            assert not stores[0].closed
+    assert stores[0].closed
+
+
+def test_atlas_constructor_closes_client_when_index_creation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailedClient:
+        closed = False
+
+        def __getitem__(self, _name: str) -> "FailedClient":
+            return self
+
+        def create_index(self, _keys: list[tuple[str, int]]) -> None:
+            raise PyMongoError("Cluster is offline")
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = FailedClient()
+    monkeypatch.setattr("rag_gateway.store.MongoClient", lambda *_args, **_kwargs: client)
+    with pytest.raises(PyMongoError, match="Cluster is offline"):
+        main.AtlasStore(Settings(_env_file=None, mongodb_uri="mongodb://atlas.test"))
+    assert client.closed
 
 
 def test_ollama_parser_sends_image_and_ocr_prompt() -> None:

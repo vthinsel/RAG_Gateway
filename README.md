@@ -230,14 +230,14 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | Method and path | Purpose |
 | --- | --- |
 | `GET /healthz` | Liveness probe |
-| `GET /readyz` | Configuration and Atlas readiness |
+| `GET /readyz` | Configuration and Atlas readiness; retries Atlas initialization after a startup connection failure |
 | `GET /metrics` | Authenticated Prometheus-format request counts and cumulative latency |
 | `GET /v1/document-loader/jobs?limit=25` | List recent ingestion jobs for authorized tenants |
 | `GET /v1/document-loader/jobs/{job_id}` | Get durable ingestion job progress and file outcomes |
 | `POST /v1/document-loader/jobs/{job_id}/cancel` | Cancel a currently running ingestion job |
 | `POST /v1/document-loader/jobs/{job_id}/retry` | Retry failed files from an allowed directory-based job |
 | `DELETE /v1/document-loader/jobs` | Clear completed job history for authorized tenant(s) |
-| `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials |
+| `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials; retries Atlas connections on refresh, without requiring a restart |
 | `GET /tools/monitoring` | Live, administrator-authenticated request activity dashboard |
 | `GET /v1/admin/monitoring` | Administrator-only in-memory request feed, in-flight calls, status totals, and per-route durations |
 | `GET /tools/evaluation` | Run retrieval evaluations with rerank/hybrid options and compare named saved baselines |
@@ -283,6 +283,29 @@ environment settings, and evaluation results retain their effective values.
 The root URL (`/`) is a welcome page with links to the tools and API docs, plus a live global status check for Atlas connectivity, the configured vector index, Ollama model availability, MongoDB AI API configuration, and gateway authentication. Open `/tools/monitoring` and enter `GATEWAY_API_KEY` to watch recent API calls, in-flight requests, response codes, durations, and per-route totals; the feed is process-local, retains at most 500 completed calls, and refreshes every 1.5 seconds. Only matched route templates are recorded—request bodies and query-string values are not captured. `/tools/document-loader` accepts browser uploads by file/folder selection or drag-and-drop, as well as scanning allowed Gateway-host directories. Preview one selected upload before ingestion; extraction is temporary and does not send text to embeddings or Atlas, though PDF/image OCR sends rendered image data to the configured Ollama service. Open `/tools/ollama` to list, pull, copy, inspect, or delete Ollama models, create a context-window variant, inspect running models, and view model details including Ollama-supported reasoning levels; this page requires the administrator `GATEWAY_API_KEY`. Open `/tools/evaluation` to submit up to 100 question cases with expected document IDs and choose reranking and hybrid search. Each saved baseline records its tenant and option flags in its run name; compare runs using the same tenant, top K, and labeled dataset to measure hit rate, recall, mean reciprocal rank, and latency. These metrics evaluate retrieval, not generated-answer correctness. Open `/tools/playground` to inspect activity and per-request timing, token usage, retrieved-source scores, and optional expected-source hits. Its benchmark runs all eight combinations of reranking, hybrid search, and reasoning on/off, with answers, scores, timings, and token use available for comparison and Markdown clipboard export. Ollama reasoning can be set by `OLLAMA_REASONING_EFFORT` and overridden in the playground. The API accepts a registered tenant key for its allowed tenant(s), or `GATEWAY_API_KEY` as an administrator key when `API_KEY_REGISTRY` is enabled. Open `/tools/chunks` to review per-tenant statistics and documents, delete individual documents, or clear a tenant. The management pages use bearer authentication; registered keys remain limited to their authorized tenants. Tenant-wide deletion requires typing the tenant ID to confirm.
 
 Ingestion jobs and retrieval evaluation runs are stored in the local SQLite database configured by `OPERATIONS_DB_PATH` (default `data/rag_gateway_operations.sqlite3`). Keep this file on persistent storage and include it in the Gateway's backup/retention policy. The database contains ingestion metadata and evaluation queries/results, so protect it accordingly. Jobs active during shutdown are marked `interrupted`; they are not resumed automatically. Failed files from directory-based jobs can be retried while the source files remain available under `DOCUMENT_LOADER_ROOTS`; browser-upload sources are temporary and must be uploaded again. Clearing history removes terminal job records but never deletes active jobs or ingested Atlas content. Docker Compose stores this database in the `rag-gateway-data` named volume. Request logs include a validated/generated `X-Request-ID` and route/status/duration fields as JSON. The authenticated `/metrics` endpoint exposes process-local Prometheus counters; counters reset when the Gateway restarts and are not intended as durable billing records.
+
+### Request Diagnostics
+
+For a 502, retain the response's `X-Request-ID` and search for that ID in the
+Gateway container logs or `/tools/monitoring`. The monitoring page supports
+outcome filters, request-ID search, and expandable processing details. Chat and
+retrieval details include the current stage, measured stage durations, effective
+options, configured model, retrieved-source count, response size, and token usage
+when the upstream returns it. Evaluation requests also report case progress.
+
+Failed requests produce structured JSON logs at ERROR level for server/upstream
+failures, or WARNING for client errors. Safe diagnostics identify exception
+types, upstream HTTP status/host when available, and file/function/line locations.
+Raw exception messages, upstream error bodies, prompts, evidence, answers,
+authorization headers, full URLs and query-string values are not copied into
+this request telemetry. Successful requests remain INFO-level events.
+
+A stream can fail after HTTP 200 has already been sent. Such calls retain their
+actual HTTP status but have `outcome=error`, appear as stream errors in the live
+monitor, and count toward its failed-request and per-route error totals.
+Prometheus HTTP status counters continue to reflect the actual transport status.
+Stage timings cover Gateway operations, not separately measured Atlas execution
+or GPU inference time. Missing usage/stage fields are unavailable, not zero.
 
 Example ingestion body:
 

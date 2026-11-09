@@ -30,7 +30,7 @@
     .connect { display: grid; grid-template-columns: minmax(200px, 1fr) auto auto; align-items: end; gap: 10px; }
     .field { display: grid; gap: 5px; }
     label { color: #294549; font-size: 13px; font-weight: 650; }
-    input { width: 100%; min-height: 40px; border: 1px solid #afc1ba; border-radius: 4px; background: #fff; color: var(--ink); padding: 8px 10px; font: inherit; }
+    input, select { width: 100%; min-height: 40px; border: 1px solid #afc1ba; border-radius: 4px; background: #fff; color: var(--ink); padding: 8px 10px; font: inherit; }
     input:focus, button:focus { outline: 2px solid #76b8a2; outline-offset: 1px; }
     button { min-height: 40px; border: 1px solid var(--green); border-radius: 4px; background: var(--green); color: #fff; padding: 8px 14px; font: inherit; font-weight: 650; cursor: pointer; }
     button.secondary { background: #fff; color: var(--green); }
@@ -42,6 +42,11 @@
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; font-size: 23px; font-variant-numeric: tabular-nums; }
     .table-wrap { overflow-x: auto; }
+    .filters { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 12px; margin: 12px 0; }
+    .processing { min-width: 250px; max-width: 480px; overflow-wrap: anywhere; }
+    details summary { color: var(--green); cursor: pointer; }
+    details pre { max-width: 480px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .request-id { overflow-wrap: anywhere; max-width: 160px; }
     table { width: 100%; border-collapse: collapse; text-align: left; }
     th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -62,6 +67,7 @@
       .connect { grid-template-columns: 1fr 1fr; }
       .connect .field { grid-column: 1 / -1; }
       .table-head { align-items: flex-start; flex-direction: column; }
+      .filters { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -81,7 +87,7 @@
         <button id="connect" type="button">Connect</button>
         <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
       </div>
-      <p class="note">The token stays in this page's memory and is not saved. Request bodies and query-string values are never captured; only matched route templates are shown.</p>
+      <p class="note">The token stays in this page's memory and is not saved. Raw request/response bodies, authorization headers and query-string values are not retained in request telemetry.</p>
       <p id="message" role="status" aria-live="polite">Enter the gateway administrator token to start monitoring.</p>
     </section>
     <section aria-labelledby="summary-title">
@@ -92,7 +98,7 @@
       <div class="summary" aria-live="polite">
         <div class="metric"><span>Total requests since process start</span><strong id="total">—</strong></div>
         <div class="metric"><span>Requests currently in flight</span><strong id="active">—</strong></div>
-        <div class="metric"><span>Failed responses (4xx/5xx)</span><strong id="failed">—</strong></div>
+        <div class="metric"><span>Failed requests (HTTP or stream)</span><strong id="failed">—</strong></div>
         <div class="metric"><span>Recent average duration</span><strong id="average">—</strong></div>
       </div>
     </section>
@@ -101,10 +107,25 @@
         <h2 id="recent-title">In-flight and recent requests</h2>
         <span class="note">Refreshes every 1.5 seconds · up to 500 completed calls retained in memory</span>
       </div>
+      <div class="filters">
+        <div class="field">
+          <label for="request-search">Search requests</label>
+          <input id="request-search" type="search" placeholder="Request ID, route, model or error">
+        </div>
+        <div class="field">
+          <label for="request-outcome">Outcome</label>
+          <select id="request-outcome">
+            <option value="all">All requests</option>
+            <option value="error">Errors</option>
+            <option value="in progress">In flight</option>
+            <option value="success">Successful</option>
+          </select>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Status</th><th>Duration</th><th>Request ID</th></tr></thead>
-          <tbody id="requests"><tr><td class="empty" colspan="6">Connect to view activity.</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Status</th><th>Duration</th><th>Request ID</th><th>Processing details</th></tr></thead>
+          <tbody id="requests"><tr><td class="empty" colspan="7">Connect to view activity.</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -128,6 +149,7 @@
     const routeRows = document.querySelector("#routes");
     let token = "";
     let timer = 0;
+    let latestRequests = [];
 
     function cell(row, value, className = "") {
       const item = document.createElement("td");
@@ -138,14 +160,23 @@
     }
 
     function renderRequests(items) {
+      latestRequests = items;
+      const expanded = new Set([...requestRows.querySelectorAll("details[open]")].map(item => item.dataset.requestId));
+      const search = document.querySelector("#request-search").value.trim().toLowerCase();
+      const outcome = document.querySelector("#request-outcome").value;
+      const filtered = items.filter(item => {
+        const state = item.outcome || (item.status === "in progress" ? "in progress" : Number(item.status) >= 400 ? "error" : "success");
+        return (outcome === "all" || outcome === state) && (!search ||
+          JSON.stringify([item.request_id, item.method, item.route, item.details]).toLowerCase().includes(search));
+      });
       requestRows.replaceChildren();
-      if (!items.length) {
+      if (!filtered.length) {
         const row = requestRows.insertRow();
-        cell(row, "No API calls recorded yet.", "empty");
-        row.firstChild.colSpan = 6;
+        cell(row, items.length ? "No matching requests." : "No API calls recorded yet.", "empty");
+        row.firstChild.colSpan = 7;
         return;
       }
-      for (const item of items) {
+      for (const item of filtered) {
         const row = requestRows.insertRow();
         cell(row, new Date(item.timestamp).toLocaleTimeString());
         cell(row, item.method, "method");
@@ -155,11 +186,36 @@
         route.append(routeCode);
         const status = cell(row, String(item.status), "status");
         if (item.status === "in progress") status.classList.add("pending");
-        else if (Number(item.status) >= 400) status.classList.add("bad");
+        else if (Number(item.status) >= 400 || item.outcome === "error") {
+          status.classList.add("bad");
+          if (Number(item.status) < 400) status.textContent += " · stream error";
+        }
         cell(row, `${Number(item.duration_ms).toFixed(2)} ms`);
         cell(row, item.request_id, "request-id");
+        const processing = cell(row, "", "processing");
+        const details = document.createElement("details");
+        details.dataset.requestId = item.request_id;
+        details.open = expanded.has(item.request_id);
+        const summary = document.createElement("summary");
+        const content = document.createElement("pre");
+        const info = item.details || {};
+        const facts = [info.stage || "Request"];
+        if (info.model) facts.push(info.model);
+        if (info.source_count != null) facts.push(`${info.source_count} sources`);
+        if (info.tokens?.total_tokens != null) facts.push(`${info.tokens.total_tokens} tokens`);
+        if (info.error) {
+          facts.push(info.error.type || info.error.category || "Error");
+          if (info.error.upstream_status) facts.push(`upstream ${info.error.upstream_status}`);
+        }
+        summary.textContent = facts.join(" · ");
+        content.textContent = JSON.stringify(info, null, 2);
+        details.append(summary, content);
+        processing.append(details);
       }
     }
+
+    document.querySelector("#request-search").addEventListener("input", () => renderRequests(latestRequests));
+    document.querySelector("#request-outcome").addEventListener("change", () => renderRequests(latestRequests));
 
     function renderRoutes(items) {
       routeRows.replaceChildren();
@@ -232,6 +288,7 @@
       message.textContent = "Monitoring disconnected.";
       message.style.color = "var(--muted)";
       requestRows.replaceChildren();
+      latestRequests = [];
       routeRows.replaceChildren();
       document.querySelector("#updated").textContent = "";
     });

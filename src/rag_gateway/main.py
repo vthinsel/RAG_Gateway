@@ -28,11 +28,14 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from pymongo.errors import PyMongoError
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.types import Scope
 
 from rag_gateway.chunking import chunk_text
 from rag_gateway.config import Settings, get_settings
@@ -58,7 +61,12 @@ from rag_gateway.models import (
     RequestOverrides,
     RetrievalEvaluationRequest,
 )
-from rag_gateway.observability import ObservabilityMiddleware, request_metrics
+from rag_gateway.observability import (
+    ObservabilityMiddleware,
+    record_request_error,
+    request_metrics,
+    request_stage,
+)
 from rag_gateway.operations import OperationsStore
 from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
@@ -138,6 +146,20 @@ async def _check_mongodb_ai_model_api(settings: Settings, client: httpx.AsyncCli
         )
 
 
+async def _ensure_atlas_store(app: FastAPI, settings: Settings) -> AtlasStore:
+    async with app.state.atlas_lock:
+        try:
+            if app.state.store is None:
+                app.state.atlas_status = "connecting"
+                app.state.store = await run_in_threadpool(AtlasStore, settings)
+            await run_in_threadpool(app.state.store.ping)
+        except PyMongoError:
+            app.state.atlas_status = "unavailable"
+            raise
+        app.state.atlas_status = "connected"
+        return app.state.store
+
+
 async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
     if settings.mongodb_uri:
         logger.info(
@@ -147,9 +169,7 @@ async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
             settings.mongodb_collection,
         )
         try:
-            app.state.store = await run_in_threadpool(AtlasStore, settings)
-            logger.info("MongoDB Atlas client initialized; sending ping")
-            await run_in_threadpool(app.state.store.ping)
+            await _ensure_atlas_store(app, settings)
             logger.info(
                 "MongoDB Atlas connection check succeeded: host=%s database=%s collection=%s",
                 _mongodb_host_label(settings.mongodb_uri),
@@ -201,9 +221,6 @@ async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
             logger.error("Atlas store initialization failed (%s): %s", type(error).__name__, error)
             logger.debug("Atlas store initialization details", exc_info=error)
             app.state.atlas_status = "unavailable"
-            if app.state.store is not None:
-                await run_in_threadpool(app.state.store.close)
-                app.state.store = None
     else:
         logger.warning("MongoDB Atlas connection check skipped: MONGODB_URI is not configured")
 
@@ -267,6 +284,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.http = httpx.AsyncClient(timeout=settings.upstream_timeout_seconds)
     app.state.store = None
+    app.state.atlas_lock = asyncio.Lock()
     app.state.atlas_status = "connecting" if settings.mongodb_uri else "not_configured"
     app.state.document_loader_tasks = set()
     app.state.document_loader_job_tasks = {}
@@ -303,6 +321,12 @@ app = FastAPI(title="Atlas RAG Gateway", version="0.1.0", lifespan=lifespan)
 app.add_middleware(ObservabilityMiddleware)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def observed_http_exception(request: Request, error: StarletteHTTPException) -> Response:
+    record_request_error(request.scope, error, error.status_code)
+    return await http_exception_handler(request, error)
+
+
 def _require_document_loader(settings: Settings) -> None:
     if not settings.document_loader_enabled:
         raise HTTPException(status_code=404, detail="Document loader is disabled")
@@ -316,21 +340,28 @@ async def _ollama_admin_request(
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base_url = settings.ollama_base_url.rstrip("/").removesuffix("/v1")
+    diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
+    diagnostics.update({"upstream_host": _host_label(base_url), "upstream_timeout_seconds": 1800.0})
     try:
-        response = await request.app.state.http.request(
-            method,
-            f"{base_url}/api/{endpoint}",
-            json=payload,
-            timeout=1800.0,
-        )
+        async with request_stage(request.scope, "ollama_admin"):
+            response = await request.app.state.http.request(
+                method,
+                f"{base_url}/api/{endpoint}",
+                json=payload,
+                timeout=1800.0,
+            )
+            diagnostics["upstream_status"] = response.status_code
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail=f"Could not connect to Ollama: {error}") from error
     if not response.is_success:
         detail = response.text[:1000]
-        raise HTTPException(
-            status_code=502,
-            detail=f"Ollama returned HTTP {response.status_code}: {detail}",
-        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Ollama returned HTTP {response.status_code}: {detail}",
+            ) from error
     try:
         result = response.json()
     except ValueError as error:
@@ -450,6 +481,32 @@ def _requested_overrides(body: dict[str, Any]) -> RequestOverrides:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+def _retrieval_diagnostics(body: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    defaults = {
+        "top_k": settings.retrieval_top_k,
+        "rerank_enabled": settings.retrieval_rerank_enabled,
+        "hybrid_enabled": settings.retrieval_hybrid_enabled,
+        "retrieval_num_candidates": settings.retrieval_num_candidates,
+        "retrieval_min_score": settings.retrieval_min_score,
+    }
+    return {key: defaults[key] if body.get(key) is None else body[key] for key in defaults}
+
+
+def _completion_diagnostics(details: dict[str, Any], result: dict[str, Any]) -> None:
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        details["tokens"] = {
+            key: value for key, value in usage.items()
+            if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+            and type(value) is int and value >= 0
+        }
+    choices = result.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        reason = choices[0].get("finish_reason")
+        if reason in ("stop", "length", "tool_calls", "content_filter", "function_call"):
+            details["finish_reason"] = reason
+
+
 def _requested_rerank_enabled(value: Any) -> bool | None:
     if value is None:
         return None
@@ -533,9 +590,9 @@ async def gateway_status(
         }
 
     store = getattr(request.app.state, "store", None)
-    if store is not None:
+    if store is not None or settings.mongodb_uri:
         try:
-            await run_in_threadpool(store.ping)
+            store = await _ensure_atlas_store(request.app, settings)
             status["atlas"] = {"status": "connected"}
             index_exists, index_queryable = await run_in_threadpool(store.vector_index_status)
             status["vector_index"]["status"] = (
@@ -601,7 +658,6 @@ async def gateway_status(
 
 @app.get("/readyz")
 async def readiness(request: Request) -> JSONResponse:
-    store = getattr(request.app.state, "store", None)
     settings = get_settings()
     missing_configuration = []
     if not settings.mongodb_uri:
@@ -613,10 +669,8 @@ async def readiness(request: Request) -> JSONResponse:
     if missing_configuration:
         logger.warning("Readiness check missing configuration: %s", ", ".join(missing_configuration))
         return JSONResponse(status_code=503, content={"status": "not_ready"})
-    if store is None:
-        return JSONResponse(status_code=503, content={"status": "not_ready"})
     try:
-        await run_in_threadpool(store.ping)
+        store = await _ensure_atlas_store(request.app, settings)
         if settings.retrieval_hybrid_enabled:
             index_exists, index_queryable = await run_in_threadpool(store.search_index_status)
             if not index_exists or not index_queryable:
@@ -1596,6 +1650,7 @@ async def delete_chunk_tenant(
 @app.post("/v1/retrieve")
 async def retrieve(
     body: dict[str, Any],
+    request: Request,
     x_tenant_id: str | None = Header(default=None),
     allowed_tenants: list[str] | None = Depends(require_tool_api_key),
     settings: Settings = Depends(get_settings),
@@ -1610,21 +1665,26 @@ async def retrieve(
     rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
     hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
     overrides = _requested_overrides(body)
+    diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
+    diagnostics.update({"retrieval_options": _retrieval_diagnostics(body, settings),
+                        "query_chars": min(len(query), settings.max_query_chars)})
     try:
-        sources = await retrieve_context(
-            query[: settings.max_query_chars],
-            tenant_id,
-            settings,
-            embedder,
-            store,
-            top_k,
-            rerank_enabled,
-            hybrid_enabled,
-            overrides.retrieval_num_candidates,
-            overrides.retrieval_min_score,
-        )
+        async with request_stage(request.scope, "retrieval"):
+            sources = await retrieve_context(
+                query[: settings.max_query_chars],
+                tenant_id,
+                settings,
+                embedder,
+                store,
+                top_k,
+                rerank_enabled,
+                hybrid_enabled,
+                overrides.retrieval_num_candidates,
+                overrides.retrieval_min_score,
+            )
     except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
         raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
+    diagnostics["source_count"] = len(sources)
     return {"data": sources}
 
 
@@ -1638,6 +1698,9 @@ async def evaluate_retrieval(
     embedder: VoyageEmbedder = Depends(get_embedder),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id(body.tenant_id, settings, allowed_tenants)
+    diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
+    diagnostics.update({"retrieval_options": _retrieval_diagnostics(body.model_dump(), settings),
+                        "case_count": len(body.cases), "cases_completed": 0})
     retrieval_overrides = body.model_dump(
         include={"retrieval_num_candidates", "retrieval_min_score"}, exclude_none=True
     )
@@ -1669,23 +1732,25 @@ async def evaluate_retrieval(
         expected_document_count += len(expected)
         started_at = asyncio.get_running_loop().time()
         try:
-            vector = (await embedder.embed([query], input_type="query"))[0]
-            sources = await run_in_threadpool(
-                store.search,
-                tenant_id,
-                vector,
-                body.top_k,
-                query=query,
-                rerank_enabled=rerank_enabled,
-                hybrid_enabled=hybrid_enabled,
-                **retrieval_overrides,
-            )
+            async with request_stage(request.scope, "retrieval"):
+                vector = (await embedder.embed([query], input_type="query"))[0]
+                sources = await run_in_threadpool(
+                    store.search,
+                    tenant_id,
+                    vector,
+                    body.top_k,
+                    query=query,
+                    rerank_enabled=rerank_enabled,
+                    hybrid_enabled=hybrid_enabled,
+                    **retrieval_overrides,
+                )
         except (httpx.HTTPError, RuntimeError) as error:
             raise HTTPException(
                 status_code=502,
                 detail=f"Retrieval evaluation failed: {type(error).__name__}",
             ) from error
         latency_ms = (asyncio.get_running_loop().time() - started_at) * 1000
+        diagnostics["cases_completed"] += 1
         latency_sum += latency_ms
         ranked_ids = [str(source["document_id"]) for source in sources]
         relevant_ranks = [index for index, document_id in enumerate(ranked_ids, start=1) if document_id in expected]
@@ -1977,44 +2042,65 @@ async def chat_completions(
         raise HTTPException(status_code=422, detail="messages must be a non-empty array")
     query = extract_user_query(messages, settings.max_query_chars)
     overrides = _requested_overrides(body)
+    diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
+    diagnostics.update({"model": settings.ollama_model, "message_count": len(messages),
+                        "query_chars": len(query), "upstream_timeout_seconds": settings.upstream_timeout_seconds})
     sources: list[dict[str, Any]] = []
     if query:
         tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
         top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
         rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
         hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
+        diagnostics["retrieval_options"] = _retrieval_diagnostics(body, settings)
         try:
-            sources = await retrieve_context(
-                query,
-                tenant_id,
-                settings,
-                embedder,
-                store,
-                top_k,
-                rerank_enabled,
-                hybrid_enabled,
-                overrides.retrieval_num_candidates,
-                overrides.retrieval_min_score,
-            )
+            async with request_stage(request.scope, "retrieval"):
+                sources = await retrieve_context(
+                    query,
+                    tenant_id,
+                    settings,
+                    embedder,
+                    store,
+                    top_k,
+                    rerank_enabled,
+                    hybrid_enabled,
+                    overrides.retrieval_num_candidates,
+                    overrides.retrieval_min_score,
+                )
         except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
             raise HTTPException(status_code=502, detail=f"Retrieval failed: {error}") from error
 
     augmented_messages = add_rag_system_message(messages, sources)
     payload = _chat_payload(body, augmented_messages, settings)
     endpoint = f"{settings.ollama_base_url.rstrip('/')}/chat/completions"
+    diagnostics.update({"source_count": len(sources), "stream": payload["stream"],
+                        "upstream_host": _host_label(settings.ollama_base_url),
+                        "generation_options": {
+                            key: payload[key] for key in ("temperature", "top_p", "max_tokens", "seed")
+                            if key in payload and type(payload[key]) in {int, float}
+                        }})
+    if payload.get("reasoning_effort") in {"none", "low", "medium", "high"}:
+        diagnostics["generation_options"]["reasoning_effort"] = payload["reasoning_effort"]
     if payload["stream"]:
         return StreamingResponse(
-            _stream_completion(request.app.state.http, endpoint, payload, sources),
+            _stream_completion(request.app.state.http, endpoint, payload, sources, request.scope),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     try:
-        upstream = await request.app.state.http.post(endpoint, json=payload)
-        upstream.raise_for_status()
+        async with request_stage(request.scope, "ollama"):
+            upstream = await request.app.state.http.post(endpoint, json=payload)
+            diagnostics["upstream_status"] = upstream.status_code
+            upstream.raise_for_status()
+            try:
+                result = upstream.json()
+            except ValueError as error:
+                raise HTTPException(status_code=502, detail="Ollama returned invalid JSON") from error
+            if not isinstance(result, dict):
+                raise HTTPException(status_code=502, detail="Ollama returned an unexpected response")
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail="Local Ollama chat request failed") from error
-    result = upstream.json()
+    _completion_diagnostics(diagnostics, result)
     result["model"] = body.get("model", settings.public_model_name)
     result["sources"] = [
         {
@@ -2069,6 +2155,7 @@ async def _stream_completion(
     endpoint: str,
     payload: dict[str, Any],
     sources: list[dict[str, Any]],
+    scope: Scope | None = None,
 ) -> AsyncIterator[bytes]:
     source_event = {
         "id": "rag-sources",
@@ -2093,14 +2180,27 @@ async def _stream_completion(
     }
     yield f"data: {json.dumps(source_event)}\n\n".encode()
     try:
-        async with client.stream("POST", endpoint, json=payload) as response:
-            if response.is_error:
-                yield b'data: {"error":{"message":"Local Ollama chat request failed"}}\n\n'
-                yield b"data: [DONE]\n\n"
-                return
+        async with (
+            request_stage(scope, "ollama_stream"),
+            client.stream("POST", endpoint, json=payload) as response,
+        ):
+            if scope is not None:
+                scope["state"]["diagnostics"]["upstream_status"] = response.status_code
+            response.raise_for_status()
             async for line in response.aiter_lines():
                 if line:
+                    if scope is not None and line.startswith("data: ") and line != "data: [DONE]":
+                        try:
+                            event = json.loads(line[6:])
+                        except ValueError:
+                            event = None
+                        if isinstance(event, dict):
+                            _completion_diagnostics(scope["state"]["diagnostics"], event)
+                            if event.get("error"):
+                                record_request_error(scope, HTTPException(502), 502)
                     yield f"{line}\n\n".encode()
-    except httpx.HTTPError:
+    except httpx.HTTPError as error:
+        if scope is not None:
+            record_request_error(scope, error, 502)
         yield b'data: {"error":{"message":"Local Ollama chat request failed"}}\n\n'
         yield b"data: [DONE]\n\n"

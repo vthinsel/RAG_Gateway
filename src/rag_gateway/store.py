@@ -18,8 +18,12 @@ class AtlasStore:
             raise RuntimeError("MONGODB_URI is not configured")
         self.settings = settings
         self.client = MongoClient(settings.mongodb_uri, serverSelectionTimeoutMS=10_000)
-        self.collection = self.client[settings.mongodb_database][settings.mongodb_collection]
-        self.collection.create_index([("tenant_id", 1), ("document_id", 1)])
+        try:
+            self.collection = self.client[settings.mongodb_database][settings.mongodb_collection]
+            self.collection.create_index([("tenant_id", 1), ("document_id", 1)])
+        except Exception:
+            self.client.close()
+            raise
 
     def ping(self) -> bool:
         self.client.admin.command("ping")
