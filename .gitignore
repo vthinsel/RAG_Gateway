@@ -18,5 +18,6 @@ htmlcov/
 data/
 *.log
 *.zip
+*.gz
 *.pdf
 .scratchpad
