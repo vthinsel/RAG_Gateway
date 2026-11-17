@@ -1,9 +1,18 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+
+class ModelPricing(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    input_per_million_usd: float | None = Field(default=None, ge=0)
+    output_per_million_usd: float | None = Field(default=None, ge=0)
+    per_request_usd: float | None = Field(default=None, ge=0)
 
 
 class Settings(BaseSettings):
@@ -62,6 +71,23 @@ class Settings(BaseSettings):
     document_parser_model: str = "glm-ocr:latest"
     document_parser_timeout_seconds: float = Field(default=300.0, gt=0)
     operations_db_path: Path = Path("data/rag_gateway_operations.sqlite3")
+    otel_traces_enabled: bool = False
+    otel_service_name: str = Field(default="rag-gateway", min_length=1, max_length=128)
+    otel_exporter_otlp_traces_endpoint: str = "http://localhost:4318/v1/traces"
+    otel_traces_sample_ratio: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)
+    model_pricing: dict[str, ModelPricing] = Field(default_factory=dict)
+
+    @field_validator("otel_exporter_otlp_traces_endpoint")
+    @classmethod
+    def validate_trace_endpoint(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
+        ):
+            raise ValueError("Trace endpoint must be an HTTP(S) URL without credentials or query")
+        return value
 
     @property
     def mongodb_api_model_base_url(self) -> str:

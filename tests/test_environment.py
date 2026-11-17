@@ -164,6 +164,15 @@ def test_environment_api_requires_admin_and_persists_updates(
                         "retrieval_rerank_model": "rerank-2.5",
                         "retrieval_rerank_candidates": 80,
                         "ollama_admin_timeout_seconds": 47.5,
+                        "otel_traces_enabled": True,
+                        "otel_exporter_otlp_traces_endpoint": "http://collector.test:4318/v1/traces",
+                        "otel_traces_sample_ratio": 0.25,
+                        "model_pricing": {
+                            "ollama:generation:chat": {
+                                "input_per_million_usd": 1.5,
+                                "output_per_million_usd": 2.0,
+                            },
+                        },
                     },
                     "secrets": {"gateway_api_key": "new-admin-key"},
                 },
@@ -182,6 +191,20 @@ def test_environment_api_requires_admin_and_persists_updates(
         restarted_settings = Settings(_env_file=tmp_path / ".env")
         assert restarted_settings.mongodb_database == "lab_rag"
         assert restarted_settings.ollama_admin_timeout_seconds == 47.5
+        assert restarted_settings.otel_traces_enabled is True
+        assert (
+            restarted_settings.otel_exporter_otlp_traces_endpoint
+            == "http://collector.test:4318/v1/traces"
+        )
+        assert restarted_settings.otel_traces_sample_ratio == 0.25
+        assert (
+            restarted_settings.model_pricing["ollama:generation:chat"].input_per_million_usd
+            == 1.5
+        )
+        assert (
+            restarted_settings.model_pricing["ollama:generation:chat"].output_per_million_usd
+            == 2.0
+        )
         assert restarted_settings.gateway_api_key == "new-admin-key"
     finally:
         main.app.dependency_overrides.pop(get_settings, None)

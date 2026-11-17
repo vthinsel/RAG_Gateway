@@ -231,7 +231,7 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | --- | --- |
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Configuration and Atlas readiness; retries Atlas initialization after a startup connection failure |
-| `GET /metrics` | Authenticated Prometheus-format request counts and cumulative latency |
+| `GET /metrics` | Administrator-only Prometheus HTTP/stage metrics and durable model usage/cost counters |
 | `GET /v1/document-loader/jobs?limit=25` | List recent ingestion jobs for authorized tenants |
 | `GET /v1/document-loader/jobs/{job_id}` | Get durable ingestion job progress and file outcomes |
 | `POST /v1/document-loader/jobs/{job_id}/cancel` | Cancel a currently running ingestion job |
@@ -240,6 +240,7 @@ For an OpenAI-compatible client, use `/v1` as the base URL and select `rag-local
 | `GET /v1/status` | Safe global status for the welcome page; reports Atlas, vector index, Ollama, and MongoDB AI API status without credentials; retries Atlas connections on refresh, without requiring a restart |
 | `GET /tools/monitoring` | Live, administrator-authenticated request activity dashboard |
 | `GET /v1/admin/monitoring` | Administrator-only in-memory request feed, in-flight calls, status totals, and per-route durations |
+| `GET /v1/admin/usage?tenant_id=...` | Administrator-only durable token/cost totals by tenant, provider, operation and model |
 | `GET /tools/evaluation` | Run retrieval evaluations with rerank/hybrid options and compare named saved baselines |
 | `GET /tools/playground` | Inspect retrieval or RAG chat, processing metrics, and an eight-option search benchmark |
 | `POST /v1/evaluations/retrieval` | Evaluate hit rate, recall, ranking, and latency; accepts `rerank_enabled` and `hybrid_enabled` |
@@ -285,6 +286,20 @@ The root URL (`/`) is a welcome page with links to the tools and API docs, a liv
 Ingestion jobs and retrieval evaluation runs are stored in the local SQLite database configured by `OPERATIONS_DB_PATH` (default `data/rag_gateway_operations.sqlite3`). Keep this file on persistent storage and include it in the Gateway's backup/retention policy. The database contains ingestion metadata and evaluation queries/results, so protect it accordingly. Jobs active during shutdown are marked `interrupted`; they are not resumed automatically. Failed files from directory-based jobs can be retried while the source files remain available under `DOCUMENT_LOADER_ROOTS`; browser-upload sources are temporary and must be uploaded again. Clearing history removes terminal job records but never deletes active jobs or ingested Atlas content. Docker Compose stores this database in the `rag-gateway-data` named volume. Request logs include a validated/generated `X-Request-ID` and route/status/duration fields as JSON. The authenticated `/metrics` endpoint exposes process-local Prometheus HTTP counters and `rag_gateway_processing_stage_duration_seconds` histograms, labeled only by internal processing stage (for example, embedding and Atlas search). These metrics reset when the Gateway restarts and are not intended as durable billing records.
 
 ### Request Diagnostics
+
+See [MONITORING.md](MONITORING.md) for Grafana dashboards using Prometheus or
+InfluxDB/Telegraf, OpenTelemetry/Tempo configuration, pricing and usage coverage.
+`/metrics` now requires the administrator `GATEWAY_API_KEY`, including when the
+tenant-key registry is enabled. It exports durable model usage/cost counters
+alongside the existing process-local HTTP/stage metrics. Model usage is stored
+in the `model_usage` table in `OPERATIONS_DB_PATH`; missing usage and prices stay
+unknown, not zero. `MODEL_PRICING` supplies your USD rates by upstream model.
+
+Tracing is disabled by default. Set `OTEL_TRACES_ENABLED=true` and point
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` at an approved OTLP/HTTP collector to export
+request and stage spans. `rag.request_id` correlates spans with `X-Request-ID`;
+the trace ID is included in request diagnostics. No prompt, answer, evidence,
+raw URL or exception message is included in these spans.
 
 For a 502, retain the response's `X-Request-ID` and search for that ID in the
 Gateway container logs or `/tools/monitoring`. The monitoring page supports
@@ -364,6 +379,11 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `OLLAMA_REASONING_EFFORT` | empty | Optional model-supported reasoning level; blank preserves the model default |
 | `UPSTREAM_TIMEOUT_SECONDS` | `180` | Timeout for chat and embedding upstream requests |
 | `OLLAMA_ADMIN_TIMEOUT_SECONDS` | `1800` | Timeout for long-running Ollama administration requests such as model pulls |
+| `OTEL_TRACES_ENABLED` | `false` | Opt-in export of safe request/stage traces |
+| `OTEL_SERVICE_NAME` | `rag-gateway` | Trace service identity |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4318/v1/traces` | Full OTLP/HTTP traces receiver URL |
+| `OTEL_TRACES_SAMPLE_RATIO` | `1.0` | Sampling probability for new root traces; incoming parent decisions are respected |
+| `MODEL_PRICING` | `{}` | USD rate map keyed by `provider:operation:model`; see [MONITORING.md](MONITORING.md) |
 | `TEMPERATURE` | `0.8` | Default chat sampling temperature (0-2); configurable in environment settings |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `150` | Character-based chunking; tune with evaluation |
 | `EMBEDDING_BATCH_SIZE` | `64` | Maximum texts in one embedding request (also constrained by the estimated token budget) |

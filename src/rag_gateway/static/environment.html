@@ -92,6 +92,13 @@
         ["upstream_timeout_seconds", "Upstream timeout (seconds)", "number"],
         ["ollama_admin_timeout_seconds", "Ollama administration timeout (seconds)", "number"]
       ]],
+      ["Monitoring and model costs", [
+        ["otel_traces_enabled", "Enable OpenTelemetry traces", "boolean", "Exports safe request and stage spans to your approved OTLP/HTTP collector; restart required."],
+        ["otel_service_name", "OpenTelemetry service name", "text"],
+        ["otel_exporter_otlp_traces_endpoint", "OTLP HTTP traces endpoint", "text", "Full URL ending in /v1/traces. Do not put credentials in the URL."],
+        ["otel_traces_sample_ratio", "Trace sampling ratio", "number", "0 to 1; usage accounting is independent of tracing and sampling."],
+        ["model_pricing", "Model pricing (JSON, USD)", "json", "Keys are provider:operation:model. Rates: input_per_million_usd, output_per_million_usd, per_request_usd. Missing rates or usage remain unknown."]
+      ]],
       ["Document loader", [
         ["document_loader_enabled", "Enable document loader", "boolean"],
         ["document_loader_roots", "Allowed document roots (JSON array)", "json"],

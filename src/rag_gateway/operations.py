@@ -28,6 +28,30 @@ class OperationsStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS model_usage (
+                    event_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    estimated_cost_usd REAL,
+                    pricing_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_model_usage_tenant_model "
+                "ON model_usage(tenant_id, provider, operation, model)"
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS retrieval_evaluations (
                     run_id TEXT PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
@@ -149,6 +173,46 @@ class OperationsStore:
                     now,
                 ),
             )
+
+    def save_model_usage(self, event: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO model_usage (
+                    event_id, created_at, request_id, trace_id, tenant_id, provider,
+                    operation, model, outcome, input_tokens, output_tokens, total_tokens,
+                    estimated_cost_usd, pricing_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid4().hex, _now(), event["request_id"], event["trace_id"],
+                    event["tenant_id"], event["provider"], event["operation"],
+                    event["model"], event["outcome"], event["input_tokens"],
+                    event["output_tokens"], event["total_tokens"], event["estimated_cost_usd"],
+                    json.dumps(event["pricing"], separators=(",", ":")),
+                ),
+            )
+
+    def model_usage_summary(self, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        where = "" if tenant_id is None else "WHERE tenant_id = ?"
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT tenant_id, provider, operation, model, COUNT(*) AS calls,
+                       SUM(CASE WHEN outcome != 'success' THEN 1 ELSE 0 END) AS failed_calls,
+                       SUM(input_tokens) AS input_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd,
+                       SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END) AS missing_usage_calls,
+                       SUM(CASE WHEN estimated_cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced_calls
+                FROM model_usage {where}
+                GROUP BY tenant_id, provider, operation, model
+                ORDER BY tenant_id, provider, operation, model
+                """,
+                () if tenant_id is None else (tenant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_job(
         self, job_id: str, allowed_tenants: list[str] | None = None

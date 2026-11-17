@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from rag_gateway.config import Settings
+from rag_gateway.telemetry import persist_model_usage, telemetry_span, trace_headers
 
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _MAX_BATCH_TOKENS = 100_000
@@ -42,15 +43,7 @@ class VoyageEmbedder:
         vectors: list[list[float]] = []
         batches = _token_batches(texts, max_items=self.settings.embedding_batch_size)
         for batch in batches:
-            response = await self._post_with_retry(
-                {
-                    "model": self.settings.voyage_embedding_model,
-                    "input": batch,
-                    "input_type": input_type,
-                }
-            )
-            response.raise_for_status()
-            payload: dict[str, Any] = response.json()
+            payload = await self._embed_batch(batch, input_type)
             data = sorted(payload["data"], key=lambda item: item["index"])
             batch_vectors = [item["embedding"] for item in data]
             if len(batch_vectors) != len(batch):
@@ -63,19 +56,49 @@ class VoyageEmbedder:
             vectors.extend(batch_vectors)
         return vectors
 
+    async def _embed_batch(self, batch: list[str], input_type: str) -> dict[str, Any]:
+        with telemetry_span("embedding.batch") as span:
+            span.set_attributes({
+                "gen_ai.request.model": self.settings.voyage_embedding_model,
+                "rag.embedding.input_type": input_type,
+                "rag.embedding.batch_size": len(batch),
+            })
+            response = await self._post_with_retry({
+                "model": self.settings.voyage_embedding_model,
+                "input": batch, "input_type": input_type,
+            })
+            response.raise_for_status()
+            return response.json()
+
     async def _post_with_retry(self, payload: dict[str, Any], attempts: int = 5) -> httpx.Response:
         for attempt in range(attempts):
+            usage: Any = None
+            outcome = "error"
             try:
-                response = await self.client.post(
-                    f"{self.settings.mongodb_api_model_base_url}/embeddings",
-                    headers={"Authorization": "Bearer " + self.settings.mongodb_api_key},
-                    json=payload,
+                try:
+                    response = await self.client.post(
+                        f"{self.settings.mongodb_api_model_base_url}/embeddings",
+                        headers={
+                            "Authorization": "Bearer " + self.settings.mongodb_api_key,
+                            **trace_headers(),
+                        },
+                        json=payload,
+                    )
+                except httpx.TransportError:
+                    if attempt == attempts - 1:
+                        raise
+                    await asyncio.sleep(min(2**attempt, 30) + random.uniform(0, 0.5))
+                    continue
+                if response.is_success:
+                    result = response.json()
+                    if isinstance(result, dict):
+                        usage = result.get("usage")
+                    outcome = "success"
+            finally:
+                await persist_model_usage(
+                    "mongodb_ai", "embedding",
+                    self.settings.voyage_embedding_model, usage, outcome,
                 )
-            except httpx.TransportError:
-                if attempt == attempts - 1:
-                    raise
-                await asyncio.sleep(min(2**attempt, 30) + random.uniform(0, 0.5))
-                continue
             if response.status_code not in _RETRYABLE_STATUS_CODES or attempt == attempts - 1:
                 return response
             retry_after = response.headers.get("Retry-After")

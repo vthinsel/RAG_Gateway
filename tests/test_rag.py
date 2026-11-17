@@ -672,7 +672,8 @@ async def test_stream_completion_emits_sources_before_upstream_chunks() -> None:
         chunks = [
             chunk
             async for chunk in _stream_completion(
-                client, "http://ollama.test/chat/completions", {"stream": True}, [source]
+                client, "http://ollama.test/chat/completions",
+                {"stream": True, "model": "test-model"}, [source],
             )
         ]
 

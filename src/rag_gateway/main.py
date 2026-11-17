@@ -71,6 +71,14 @@ from rag_gateway.observability import (
 from rag_gateway.operations import OperationsStore
 from rag_gateway.rag import add_rag_system_message, extract_user_query, retrieve_context
 from rag_gateway.store import AtlasStore
+from rag_gateway.telemetry import (
+    Telemetry,
+    annotate_model_span,
+    persist_model_usage,
+    trace_headers,
+    usage_prometheus,
+    usage_tenant,
+)
 from rag_gateway.voyage import VoyageEmbedder
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -273,6 +281,7 @@ async def _initialize_integrations(app: FastAPI, settings: Settings) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     app.state.operations = await run_in_threadpool(OperationsStore, settings.operations_db_path)
+    app.state.telemetry = Telemetry(settings, app.state.operations)
     logger.info(
         "Gateway authentication configuration: cwd=%s dotenv=%s dotenv_exists=%s "
         "gateway_key_configured=%s process_env_override=%s registry_entries=%s",
@@ -305,17 +314,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
 
     app.state.integration_task.add_done_callback(log_integration_failure)
-    yield
-    active_tasks = tuple(app.state.document_loader_tasks)
-    for task in active_tasks:
-        task.cancel()
-    if active_tasks:
-        await asyncio.gather(*active_tasks, return_exceptions=True)
-    app.state.integration_task.cancel()
-    await asyncio.gather(app.state.integration_task, return_exceptions=True)
-    if app.state.store is not None:
-        await run_in_threadpool(app.state.store.close)
-    await app.state.http.aclose()
+    try:
+        yield
+    finally:
+        active_tasks = tuple(app.state.document_loader_tasks)
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        app.state.integration_task.cancel()
+        await asyncio.gather(app.state.integration_task, return_exceptions=True)
+        try:
+            if app.state.store is not None:
+                await run_in_threadpool(app.state.store.close)
+            await app.state.http.aclose()
+        finally:
+            await run_in_threadpool(app.state.telemetry.close)
 
 
 app = FastAPI(title="Atlas RAG Gateway", version="0.1.0", lifespan=lifespan)
@@ -531,10 +545,26 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/metrics", include_in_schema=False)
-async def metrics(_: list[str] | None = Depends(require_api_key)) -> Response:
+async def metrics(
+    request: Request, _: None = Depends(require_environment_admin),
+) -> Response:
+    usage = await run_in_threadpool(request.app.state.operations.model_usage_summary)
     return Response(
-        content=request_metrics.prometheus(),
+        content=request_metrics.prometheus() + usage_prometheus(usage),
         media_type="text/plain; version=0.0.4; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/admin/usage")
+async def model_usage_summary(
+    request: Request, tenant_id: str | None = None,
+    _: None = Depends(require_environment_admin),
+) -> JSONResponse:
+    usage = await run_in_threadpool(request.app.state.operations.model_usage_summary, tenant_id)
+    return JSONResponse(
+        content={"currency": "USD", "groups": usage},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -1081,7 +1111,8 @@ async def _queue_document_loader_job(
 
     async def ingest_parsed_document(document: ParsedDocument) -> dict[str, Any]:
         chunks = chunk_text(document.text, settings.chunk_size, settings.chunk_overlap)
-        embeddings = await embedder.embed(chunks, input_type="document")
+        with usage_tenant(document.tenant_id):
+            embeddings = await embedder.embed(chunks, input_type="document")
         count = await run_in_threadpool(
             store.replace_document,
             document.tenant_id,
@@ -1196,7 +1227,8 @@ async def _queue_document_loader_job(
                 if cleanup_directory:
                     await asyncio.to_thread(shutil.rmtree, directory, True)
 
-    task = asyncio.create_task(run_job())
+    with usage_tenant(tenant_id):
+        task = asyncio.create_task(run_job())
     tasks.add(task)
     job_tasks: dict[str, asyncio.Task[Any]] = request.app.state.document_loader_job_tasks
     job_tasks[job_id] = task
@@ -1564,7 +1596,8 @@ async def ingest_document(
         raise HTTPException(status_code=413, detail="Document exceeds MAX_DOCUMENT_CHARS")
     chunks = chunk_text(body.text, settings.chunk_size, settings.chunk_overlap)
     try:
-        embeddings = await embedder.embed(chunks, input_type="document")
+        with usage_tenant(body.tenant_id):
+            embeddings = await embedder.embed(chunks, input_type="document")
         count = await run_in_threadpool(
             store.replace_document,
             body.tenant_id,
@@ -1738,7 +1771,7 @@ async def evaluate_retrieval(
         case_completed = False
         try:
             async with request_stage(request.scope, "retrieval"):
-                with processing_stage("embedding"):
+                with usage_tenant(tenant_id), processing_stage("embedding"):
                     vector = (await embedder.embed([query], input_type="query"))[0]
                 sources = await run_in_threadpool(
                     store.search,
@@ -2024,7 +2057,7 @@ async def _ollama_chat_stream(response: StreamingResponse, model: str) -> AsyncI
                         )
                         + "\n"
                     ).encode()
-                    return
+                    continue
                 chunk_data = json.loads(event)
                 if "error" in chunk_data:
                     yield (json.dumps(chunk_data) + "\n").encode()
@@ -2064,8 +2097,8 @@ async def chat_completions(
     diagnostics.update({"model": settings.ollama_model, "message_count": len(messages),
                         "query_chars": len(query), "upstream_timeout_seconds": settings.upstream_timeout_seconds})
     sources: list[dict[str, Any]] = []
+    tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
     if query:
-        tenant_id = get_tenant_id(x_tenant_id, settings, allowed_tenants)
         top_k = _requested_top_k(body.get("top_k"), settings.retrieval_top_k)
         rerank_enabled = _requested_rerank_enabled(body.get("rerank_enabled"))
         hybrid_enabled = _requested_hybrid_enabled(body.get("hybrid_enabled"))
@@ -2099,15 +2132,24 @@ async def chat_completions(
     if payload.get("reasoning_effort") in {"none", "low", "medium", "high"}:
         diagnostics["generation_options"]["reasoning_effort"] = payload["reasoning_effort"]
     if payload["stream"]:
+        payload["stream_options"] = {"include_usage": True}
         return StreamingResponse(
-            _stream_completion(request.app.state.http, endpoint, payload, sources, request.scope),
+            _stream_completion(
+                request.app.state.http, endpoint, payload, sources, request.scope,
+                tenant_id=tenant_id,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    usage: Any = None
+    outcome = "error"
     try:
         async with request_stage(request.scope, "ollama"):
-            upstream = await request.app.state.http.post(endpoint, json=payload)
+            annotate_model_span("ollama", "generation", settings.ollama_model)
+            upstream = await request.app.state.http.post(
+                endpoint, json=payload, headers=trace_headers(),
+            )
             diagnostics["upstream_status"] = upstream.status_code
             upstream.raise_for_status()
             try:
@@ -2116,8 +2158,15 @@ async def chat_completions(
                 raise HTTPException(status_code=502, detail="Ollama returned invalid JSON") from error
             if not isinstance(result, dict):
                 raise HTTPException(status_code=502, detail="Ollama returned an unexpected response")
+            usage = result.get("usage")
+            outcome = "success"
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail="Local Ollama chat request failed") from error
+    finally:
+        await persist_model_usage(
+            "ollama", "generation", settings.ollama_model,
+            usage, outcome, tenant_id=tenant_id,
+        )
     _completion_diagnostics(diagnostics, result)
     result["model"] = body.get("model", settings.public_model_name)
     result["sources"] = [
@@ -2174,6 +2223,8 @@ async def _stream_completion(
     payload: dict[str, Any],
     sources: list[dict[str, Any]],
     scope: Scope | None = None,
+    *,
+    tenant_id: str = "",
 ) -> AsyncIterator[bytes]:
     source_event = {
         "id": "rag-sources",
@@ -2197,28 +2248,47 @@ async def _stream_completion(
         ],
     }
     yield f"data: {json.dumps(source_event)}\n\n".encode()
+    usage: Any = None
+    outcome = "incomplete"
     try:
         async with (
             request_stage(scope, "ollama_stream"),
-            client.stream("POST", endpoint, json=payload) as response,
+            client.stream("POST", endpoint, json=payload, headers=trace_headers()) as response,
         ):
+            annotate_model_span("ollama", "generation", payload["model"])
             if scope is not None:
                 scope["state"]["diagnostics"]["upstream_status"] = response.status_code
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line:
-                    if scope is not None and line.startswith("data: ") and line != "data: [DONE]":
+                    if line == "data: [DONE]":
+                        if outcome != "error":
+                            outcome = "success"
+                    elif line.startswith("data: "):
                         try:
                             event = json.loads(line[6:])
                         except ValueError:
                             event = None
                         if isinstance(event, dict):
-                            _completion_diagnostics(scope["state"]["diagnostics"], event)
+                            if isinstance(event.get("usage"), dict):
+                                usage = event["usage"]
+                            if scope is not None:
+                                _completion_diagnostics(scope["state"]["diagnostics"], event)
                             if event.get("error"):
-                                record_request_error(scope, HTTPException(502), 502)
+                                outcome = "error"
+                                if scope is not None:
+                                    record_request_error(scope, HTTPException(502), 502)
                     yield f"{line}\n\n".encode()
+            if outcome == "incomplete" and scope is not None:
+                record_request_error(scope, HTTPException(502), 502)
     except httpx.HTTPError as error:
+        outcome = "error"
         if scope is not None:
             record_request_error(scope, error, 502)
         yield b'data: {"error":{"message":"Local Ollama chat request failed"}}\n\n'
         yield b"data: [DONE]\n\n"
+    finally:
+        await persist_model_usage(
+            "ollama", "generation", payload["model"],
+            usage, outcome, tenant_id=tenant_id,
+        )

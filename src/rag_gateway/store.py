@@ -8,6 +8,7 @@ from pymongo import MongoClient, ReplaceOne
 
 from rag_gateway.config import Settings
 from rag_gateway.observability import current_request_id, processing_stage
+from rag_gateway.telemetry import annotate_model_span, record_model_usage
 
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
@@ -306,7 +307,18 @@ class AtlasStore:
                 ]
             )
         with processing_stage("atlas_vector_rerank" if rerank_enabled else "atlas_vector"):
-            vector_candidates = list(self.collection.aggregate(pipeline))
+            if rerank_enabled:
+                annotate_model_span("atlas", "rerank", self.settings.retrieval_rerank_model)
+            rerank_outcome = "error"
+            try:
+                vector_candidates = list(self.collection.aggregate(pipeline))
+                rerank_outcome = "success"
+            finally:
+                if rerank_enabled:
+                    record_model_usage(
+                        "atlas", "rerank", self.settings.retrieval_rerank_model,
+                        None, rerank_outcome, tenant_id=tenant_id,
+                    )
         if hybrid_enabled:
             vector_candidates = [
                 candidate for candidate in vector_candidates if candidate["score"] >= min_score

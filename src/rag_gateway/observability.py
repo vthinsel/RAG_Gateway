@@ -19,6 +19,14 @@ import httpx
 from pymongo.errors import PyMongoError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from rag_gateway.telemetry import (
+    correlate_request,
+    finish_request_span,
+    mark_span_error,
+    request_telemetry,
+    telemetry_span,
+)
+
 logger = logging.getLogger("uvicorn.error")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _request_scope: ContextVar[Scope | None] = ContextVar("request_scope", default=None)
@@ -292,6 +300,7 @@ def current_request_id() -> str:
 
 
 def record_request_error(scope: Scope, error: Exception, status: int) -> None:
+    mark_span_error(error)
     cause = error
     chain = [type(error).__name__]
     while cause.__cause__ is not None and len(chain) < 5:
@@ -337,6 +346,12 @@ def processing_stage(stage: str) -> Iterator[None]:
 
 @contextmanager
 def _measure_stage(scope: Scope | None, stage: str) -> Iterator[None]:
+    with telemetry_span(stage), _measure_stage_duration(scope, stage):
+        yield
+
+
+@contextmanager
+def _measure_stage_duration(scope: Scope | None, stage: str) -> Iterator[None]:
     state = scope.setdefault("state", {}) if scope is not None else {}
     lock = state.setdefault("timing_lock", threading.RLock())
     with lock:
@@ -380,6 +395,17 @@ class ObservabilityMiddleware:
             await self.app(scope, receive, send)
             return
 
+        application = scope.get("app")
+        runtime = getattr(application.state, "telemetry", None) if application else None
+        headers = {
+            key.decode("latin-1"): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+            if key in {b"traceparent", b"tracestate"}
+        }
+        with request_telemetry(runtime, headers):
+            await self._observe_http(scope, receive, send)
+
+    async def _observe_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         headers = dict(scope.get("headers", []))
         supplied_id = headers.get(b"x-request-id", b"").decode("latin-1")
         request_id = supplied_id if _REQUEST_ID.fullmatch(supplied_id) else uuid4().hex
@@ -388,6 +414,9 @@ class ObservabilityMiddleware:
         state = scope.setdefault("state", {})
         state["request_id"] = request_id
         state["diagnostics"] = {"stage": "routing"}
+        trace_id = correlate_request(request_id)
+        if trace_id:
+            state["diagnostics"]["trace_id"] = trace_id
         scope_token = _request_scope.set(scope)
         response_bytes = 0
         request_metrics.begin(request_id, scope["method"], scope)
@@ -417,6 +446,10 @@ class ObservabilityMiddleware:
             if status < 400 and not state["diagnostics"].get("error"):
                 state["diagnostics"]["stage"] = "completed"
             route = getattr(scope.get("route"), "path", "unmatched")
+            finish_request_span(
+                scope["method"], route, status,
+                status >= 400 or bool(state["diagnostics"].get("error")),
+            )
             request_metrics.observe(
                 scope["method"], route, status, duration, request_id=request_id,
                 details=state["diagnostics"],

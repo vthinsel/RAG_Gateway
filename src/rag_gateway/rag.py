@@ -7,6 +7,7 @@ from starlette.concurrency import run_in_threadpool
 from rag_gateway.config import Settings
 from rag_gateway.observability import processing_stage
 from rag_gateway.store import AtlasStore
+from rag_gateway.telemetry import usage_tenant
 from rag_gateway.voyage import VoyageEmbedder
 
 _EVIDENCE_FENCE = re.compile(r"</?retrieved_evidence[^>]*>", re.IGNORECASE)
@@ -30,7 +31,7 @@ async def retrieve_context(
     retrieval_num_candidates: int | None = None,
     retrieval_min_score: float | None = None,
 ) -> list[dict[str, Any]]:
-    with processing_stage("embedding"):
+    with usage_tenant(tenant_id), processing_stage("embedding"):
         query_vector = (await embedder.embed([query], input_type="query"))[0]
     search_options: dict[str, Any] = {}
     if rerank_enabled is not None:

@@ -15,6 +15,13 @@ from typing import Any, Protocol
 
 import httpx
 
+from rag_gateway.telemetry import (
+    annotate_model_span,
+    record_model_usage,
+    telemetry_span,
+    trace_headers,
+)
+
 DEFAULT_INCLUDE_EXTENSIONS = (
     ".pdf",
     ".txt",
@@ -187,23 +194,34 @@ class OllamaDocumentParser:
         return sorted(item["name"] for item in response.json().get("models", []))
 
     def parse_image(self, image: bytes) -> str:
-        response = self.client.post(
-            f"{self.base_url}/api/chat",
-            json={
-                "model": self.model,
-                "stream": False,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": OLLAMA_OCR_PROMPT,
-                        "images": [base64.b64encode(image).decode("ascii")],
+        usage: dict[str, Any] | None = None
+        outcome = "error"
+        with telemetry_span("ollama_ocr"):
+            annotate_model_span("ollama", "ocr", self.model)
+            try:
+                response = self.client.post(
+                    f"{self.base_url}/api/chat", headers=trace_headers(),
+                    json={
+                        "model": self.model,
+                        "stream": False,
+                        "messages": [{
+                            "role": "user",
+                            "content": OLLAMA_OCR_PROMPT,
+                            "images": [base64.b64encode(image).decode("ascii")],
+                        }],
+                        "options": {"temperature": 0},
                     }
-                ],
-                "options": {"temperature": 0},
-            },
-        )
-        response.raise_for_status()
-        content = response.json().get("message", {}).get("content", "")
+                )
+                response.raise_for_status()
+                result = response.json()
+                usage = {
+                    "prompt_tokens": result.get("prompt_eval_count"),
+                    "completion_tokens": result.get("eval_count"),
+                }
+                content = result.get("message", {}).get("content", "")
+                outcome = "success"
+            finally:
+                record_model_usage("ollama", "ocr", self.model, usage, outcome)
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError(f"Ollama model {self.model!r} returned no parsed text")
         return content.strip()

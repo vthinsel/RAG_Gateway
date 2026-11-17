@@ -4,8 +4,8 @@ These are the remaining improvement ideas not included in the current change.
 
 ## Observability and operations
 
-- [ ] Add OpenTelemetry traces with request IDs and spans for embedding, Atlas retrieval, reranking, and generation.
-- [ ] Persist token usage and model/API cost estimates by tenant and model; include embedding and reranking usage where available.
+- [x] Add OpenTelemetry traces with request IDs and spans for embedding, Atlas retrieval, reranking, and generation. See [MONITORING.md](MONITORING.md).
+- [x] Persist token usage and model/API cost estimates by tenant and model; include embedding and reranking usage where available. See [MONITORING.md](MONITORING.md).
 - [ ] Make monitoring useful across restarts and multiple workers, or explicitly constrain deployments to one worker.
 - [ ] Add configurable alert thresholds for error rate, latency, and dependency health.
 - [ ] Replace JSON strings sent through the Uvicorn error logger with a dedicated structured logger and configurable log level.
