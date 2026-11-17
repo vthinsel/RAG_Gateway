@@ -37,6 +37,24 @@
     .component .state { font-weight: 700; color: var(--muted); }
     .component .state.ok { color: var(--green); }
     .component .state.bad { color: var(--red); }
+    .flow-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    .flow-note { color: var(--muted); font-size: 12px; }
+    .flow-scroll { overflow-x: auto; }
+    .gateway-flow { display: block; width: 100%; min-width: 760px; height: auto; }
+    .flow-lane { fill: #f7faf7; stroke: var(--line); stroke-width: 1.5; }
+    .flow-lane-label { fill: var(--muted); font-size: 15px; font-weight: 700; }
+    .flow-link { fill: none; stroke: #8ba39a; stroke-width: 2; marker-end: url(#flow-arrow); }
+    .flow-link.optional { stroke-dasharray: 6 5; }
+    .flow-link-label { fill: var(--muted); font-size: 12px; }
+    .flow-node rect { fill: #fff; stroke: #aabbb2; stroke-width: 2; rx: 7; }
+    .flow-node.ok rect { fill: #edf7f0; stroke: var(--green); }
+    .flow-node.bad rect { fill: #fff1ed; stroke: var(--red); }
+    .flow-node.unknown rect { fill: #f7f5eb; stroke: #a98d43; }
+    .flow-node text { fill: var(--ink); font-family: inherit; }
+    .flow-node .node-title { font-size: 15px; font-weight: 700; }
+    .flow-node .node-status { fill: var(--muted); font-size: 12px; }
+    .flow-node.ok .node-status { fill: var(--green); }
+    .flow-node.bad .node-status { fill: var(--red); }
     .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     .tool { display: block; color: var(--ink); text-decoration: none; border: 1px solid var(--line); border-radius: 5px; padding: 15px; }
     .tool:hover, .tool:focus { border-color: var(--green); outline: 2px solid #76b8a2; }
@@ -74,6 +92,99 @@
       </div>
       <div id="components" class="grid" aria-live="polite"></div>
       <p id="status-error" role="status"></p>
+    </section>
+    <section aria-labelledby="flow-title">
+      <div class="flow-heading">
+        <h2 id="flow-title">Gateway architecture and live flow</h2>
+        <span class="flow-note">Component health refreshes with the status check.</span>
+      </div>
+      <div class="flow-scroll">
+        <svg class="gateway-flow" viewBox="0 0 980 420" role="img"
+             aria-labelledby="flow-svg-title flow-svg-description">
+          <title id="flow-svg-title">RAG Gateway ingestion and question-answering flows</title>
+          <desc id="flow-svg-description">
+            Documents pass through the loader and embedding service into Atlas. Questions pass
+            through the gateway, embedding and Atlas retrieval, then Ollama generates an answer.
+            Dashed arrows indicate optional hybrid text search.
+          </desc>
+          <defs>
+            <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ba39a"></path>
+            </marker>
+          </defs>
+          <rect class="flow-lane" x="8" y="12" width="964" height="140" rx="8"></rect>
+          <text class="flow-lane-label" x="26" y="38">Document ingestion</text>
+          <rect class="flow-lane" x="8" y="166" width="964" height="242" rx="8"></rect>
+          <text class="flow-lane-label" x="26" y="192">Question answering</text>
+          <path class="flow-link" d="M 155 94 H 205"></path>
+          <path class="flow-link" d="M 345 94 H 395"></path>
+          <path class="flow-link" d="M 545 94 H 600"></path>
+          <path class="flow-link" d="M 150 278 H 205"></path>
+          <path class="flow-link" d="M 345 278 H 395"></path>
+          <path class="flow-link" d="M 540 278 H 590"></path>
+          <path class="flow-link optional" d="M 345 294 H 365 V 371 H 395"></path>
+          <path class="flow-link" d="M 735 278 H 790"></path>
+          <path class="flow-link" d="M 865 311 V 350"></path>
+          <text class="flow-link-label" x="359" y="348" text-anchor="end">optional text</text>
+          <g class="flow-node" transform="translate(25 61)">
+            <rect width="130" height="66"></rect>
+            <text class="node-title" x="65" y="28" text-anchor="middle">Documents</text>
+            <text class="node-status" x="65" y="49" text-anchor="middle">source files</text>
+          </g>
+          <g class="flow-node" transform="translate(205 61)">
+            <rect width="140" height="66"></rect>
+            <text class="node-title" x="70" y="28" text-anchor="middle">Loader + chunks</text>
+            <text class="node-status" x="70" y="49" text-anchor="middle">parse · split</text>
+          </g>
+          <g class="flow-node" data-component="mongodb_ai_api" transform="translate(395 61)">
+            <rect width="150" height="66"></rect>
+            <text class="node-title" x="75" y="28" text-anchor="middle">Embeddings API</text>
+            <text class="node-status" data-status x="75" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <g class="flow-node" data-component="atlas" transform="translate(600 61)">
+            <rect width="170" height="66"></rect>
+            <text class="node-title" x="85" y="28" text-anchor="middle">Atlas collection</text>
+            <text class="node-status" data-status x="85" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <text class="flow-link-label" x="26" y="230">user query</text>
+          <g class="flow-node" transform="translate(25 245)">
+            <rect width="125" height="66"></rect>
+            <text class="node-title" x="62" y="28" text-anchor="middle">Client</text>
+            <text class="node-status" x="62" y="49" text-anchor="middle">OpenAI API</text>
+          </g>
+          <g class="flow-node" data-component="application" transform="translate(205 245)">
+            <rect width="140" height="66"></rect>
+            <text class="node-title" x="70" y="28" text-anchor="middle">Gateway API</text>
+            <text class="node-status" data-status x="70" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <g class="flow-node" data-component="mongodb_ai_api" transform="translate(395 245)">
+            <rect width="145" height="66"></rect>
+            <text class="node-title" x="72" y="28" text-anchor="middle">Query embedding</text>
+            <text class="node-status" data-status x="72" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <g class="flow-node" data-component="vector_index" transform="translate(590 245)">
+            <rect width="145" height="66"></rect>
+            <text class="node-title" x="72" y="28" text-anchor="middle">Atlas retrieval</text>
+            <text class="node-status" data-status x="72" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <g class="flow-node" data-component="ollama" transform="translate(790 245)">
+            <rect width="150" height="66"></rect>
+            <text class="node-title" x="75" y="28" text-anchor="middle">Ollama</text>
+            <text class="node-status" data-status x="75" y="49" text-anchor="middle">Checking</text>
+          </g>
+          <g class="flow-node" data-component="search_index" transform="translate(395 350)">
+            <rect width="150" height="42"></rect>
+            <text class="node-title" x="75" y="19" text-anchor="middle">Atlas Search</text>
+            <text class="node-status" data-status x="75" y="35" text-anchor="middle">Optional</text>
+          </g>
+          <g class="flow-node" transform="translate(790 350)">
+            <rect width="150" height="42"></rect>
+            <text class="node-title" x="75" y="27" text-anchor="middle">Grounded answer</text>
+          </g>
+        </svg>
+      </div>
+      <p class="flow-note">Solid lines show the standard path; dashed lines show optional hybrid text retrieval.</p>
     </section>
     <section aria-labelledby="tools-title">
       <h2 id="tools-title">Gateway tools and endpoints</h2>
@@ -166,6 +277,21 @@
         card.append(title, state, details);
         components.append(card);
       }
+      for (const node of document.querySelectorAll(".flow-node[data-component]")) {
+        const key = node.dataset.component;
+        const info = data[key];
+        const state = node.querySelector("[data-status]");
+        if (!info) {
+          node.classList.remove("ok", "bad");
+          node.classList.add("unknown");
+          state.textContent = "not enabled";
+          continue;
+        }
+        const healthy = ["ok", "connected", "ready", "configured"].includes(info.status);
+        node.classList.remove("ok", "bad", "unknown");
+        node.classList.add(healthy ? "ok" : "bad");
+        state.textContent = info.status.replaceAll("_", " ");
+      }
       document.querySelector("#checked-at").textContent = `Checked ${new Date().toLocaleTimeString()}`;
     }
 
@@ -181,6 +307,11 @@
         overall.textContent = "status unavailable";
         overall.className = "not_ready";
         errorMessage.textContent = error.message;
+        for (const node of document.querySelectorAll(".flow-node[data-component]")) {
+          node.classList.remove("ok", "bad");
+          node.classList.add("unknown");
+          node.querySelector("[data-status]").textContent = "unavailable";
+        }
       } finally {
         document.querySelector("#refresh").disabled = false;
       }

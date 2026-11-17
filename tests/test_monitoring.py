@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pymongo.errors import PyMongoError
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rag_gateway import main
@@ -110,6 +111,32 @@ def test_handled_502_logs_upstream_cause_without_secret_content(caplog) -> None:
     assert "private-password" not in combined
     assert "private-query" not in combined
     assert "private-body" not in combined
+
+
+def test_atlas_retrieval_warning_includes_request_id(caplog) -> None:
+    class Collection:
+        def aggregate(self, _pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{"document_id": "low-score.md", "score": 0.1}]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = Settings(_env_file=None, atlas_vector_index="test-index")
+    store.collection = Collection()
+    application = FastAPI()
+    application.add_middleware(ObservabilityMiddleware)
+
+    @application.get("/retrieve")
+    async def retrieve() -> dict[str, int]:
+        results = await run_in_threadpool(store.search, "tenant-a", [0.1], 3)
+        return {"count": len(results)}
+
+    with (
+        caplog.at_level(logging.WARNING, logger="uvicorn.error"),
+        TestClient(application) as client,
+    ):
+        response = client.get("/retrieve", headers={"X-Request-ID": "atlas-warning-test"})
+
+    assert response.status_code == 200
+    assert "request_id=atlas-warning-test" in caplog.text
 
 
 @pytest.mark.parametrize("kind", ["success", "http_error", "timeout", "invalid_json", "stream_error", "mongodb_error"])

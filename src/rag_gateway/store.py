@@ -7,7 +7,7 @@ from typing import Any
 from pymongo import MongoClient, ReplaceOne
 
 from rag_gateway.config import Settings
-from rag_gateway.observability import processing_stage
+from rag_gateway.observability import current_request_id, processing_stage
 
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
@@ -308,6 +308,9 @@ class AtlasStore:
         with processing_stage("atlas_vector_rerank" if rerank_enabled else "atlas_vector"):
             vector_candidates = list(self.collection.aggregate(pipeline))
         if hybrid_enabled:
+            vector_candidates = [
+                candidate for candidate in vector_candidates if candidate["score"] >= min_score
+            ]
             lexical_pipeline = [
                 {
                     "$search": {
@@ -365,19 +368,23 @@ class AtlasStore:
             if candidates:
                 logger.warning(
                     "Atlas retrieval found vector candidates but filtered them all: "
-                    "tenant_id=%s index=%s candidates=%d best_score=%.4f min_score=%.4f",
+                    "tenant_id=%s index=%s candidates=%d best_score=%.4f min_score=%.4f "
+                    "request_id=%s",
                     tenant_id,
                     self.settings.atlas_vector_index,
                     len(candidates),
                     max(candidate["score"] for candidate in candidates),
                     min_score,
+                    current_request_id() or "-",
                 )
             else:
                 logger.warning(
                     "Atlas retrieval found no vector candidates: tenant_id=%s index=%s; "
-                    "check that documents exist for this tenant and the vector index is ready",
+                    "check that documents exist for this tenant and the vector index is ready "
+                    "request_id=%s",
                     tenant_id,
                     self.settings.atlas_vector_index,
+                    current_request_id() or "-",
                 )
         for match in matches:
             match.pop("_id", None)

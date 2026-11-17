@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     max_document_chars: int = Field(default=1_000_000, ge=1)
     max_query_chars: int = Field(default=8_000, ge=1)
     upstream_timeout_seconds: float = Field(default=180.0, gt=0)
+    ollama_admin_timeout_seconds: float = Field(default=1800.0, gt=0)
     document_loader_enabled: bool = False
     document_loader_roots: list[Path] = Field(default_factory=list)
     document_loader_max_active_jobs: int = Field(default=2, ge=1, le=8)

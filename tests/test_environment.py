@@ -163,6 +163,7 @@ def test_environment_api_requires_admin_and_persists_updates(
                         "retrieval_rerank_enabled": True,
                         "retrieval_rerank_model": "rerank-2.5",
                         "retrieval_rerank_candidates": 80,
+                        "ollama_admin_timeout_seconds": 47.5,
                     },
                     "secrets": {"gateway_api_key": "new-admin-key"},
                 },
@@ -176,9 +177,11 @@ def test_environment_api_requires_admin_and_persists_updates(
         assert values["RETRIEVAL_RERANK_ENABLED"] == "true"
         assert values["RETRIEVAL_RERANK_MODEL"] == "rerank-2.5"
         assert values["RETRIEVAL_RERANK_CANDIDATES"] == "80"
+        assert values["OLLAMA_ADMIN_TIMEOUT_SECONDS"] == "47.5"
         assert values["GATEWAY_API_KEY"] == "new-admin-key"
         restarted_settings = Settings(_env_file=tmp_path / ".env")
         assert restarted_settings.mongodb_database == "lab_rag"
+        assert restarted_settings.ollama_admin_timeout_seconds == 47.5
         assert restarted_settings.gateway_api_key == "new-admin-key"
     finally:
         main.app.dependency_overrides.pop(get_settings, None)

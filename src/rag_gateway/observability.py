@@ -22,6 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger("uvicorn.error")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _request_scope: ContextVar[Scope | None] = ContextVar("request_scope", default=None)
+_STAGE_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 
 
 class RequestEvent(TypedDict):
@@ -60,8 +61,20 @@ class RequestMetrics:
         self._durations: dict[tuple[str, str], float] = defaultdict(float)
         self._duration_counts: Counter[tuple[str, str]] = Counter()
         self._application_failures: Counter[tuple[str, str]] = Counter()
+        self._stage_duration_counts: Counter[str] = Counter()
+        self._stage_duration_sums: dict[str, float] = defaultdict(float)
+        self._stage_duration_buckets: dict[str, Counter[float]] = defaultdict(Counter)
         self._active: dict[str, tuple[float, str, Scope]] = {}
         self._recent: deque[RequestEvent] = deque(maxlen=500)
+
+    def observe_stage(self, stage: str, duration: float) -> None:
+        with self._lock:
+            self._stage_duration_counts[stage] += 1
+            self._stage_duration_sums[stage] += duration
+            for bucket in _STAGE_DURATION_BUCKETS:
+                if duration <= bucket:
+                    self._stage_duration_buckets[stage][bucket] += 1
+                    break
 
     def begin(self, request_id: str, method: str, scope: Scope) -> None:
         if scope.get("path") == "/v1/admin/monitoring":
@@ -175,6 +188,12 @@ class RequestMetrics:
             requests = sorted(self._requests.items())
             durations = sorted(self._durations.items())
             duration_counts = sorted(self._duration_counts.items())
+            stage_counts = dict(self._stage_duration_counts)
+            stage_sums = dict(self._stage_duration_sums)
+            stage_buckets = {
+                stage: dict(counts)
+                for stage, counts in self._stage_duration_buckets.items()
+            }
         lines = [
             "# HELP rag_gateway_http_requests_total Total HTTP requests handled.",
             "# TYPE rag_gateway_http_requests_total counter",
@@ -212,6 +231,32 @@ class RequestMetrics:
             f'route="{_label(route)}"}} {duration:.6f}'
             for (method, route), duration in durations
         )
+        lines.extend(
+            [
+                "# HELP rag_gateway_processing_stage_duration_seconds Gateway processing stage duration.",
+                "# TYPE rag_gateway_processing_stage_duration_seconds histogram",
+            ]
+        )
+        for stage, count in sorted(stage_counts.items()):
+            cumulative = 0
+            for bucket in _STAGE_DURATION_BUCKETS:
+                cumulative += stage_buckets.get(stage, {}).get(bucket, 0)
+                lines.append(
+                    'rag_gateway_processing_stage_duration_seconds_bucket'
+                    f'{{stage="{_label(stage)}",le="{bucket:g}"}} {cumulative}'
+                )
+            lines.append(
+                'rag_gateway_processing_stage_duration_seconds_bucket'
+                f'{{stage="{_label(stage)}",le="+Inf"}} {count}'
+            )
+            lines.append(
+                f'rag_gateway_processing_stage_duration_seconds_sum'
+                f'{{stage="{_label(stage)}"}} {stage_sums[stage]:.6f}'
+            )
+            lines.append(
+                f'rag_gateway_processing_stage_duration_seconds_count'
+                f'{{stage="{_label(stage)}"}} {count}'
+            )
         return "\n".join(lines) + "\n"
 
 
@@ -233,6 +278,17 @@ def _label(value: str) -> str:
 
 
 request_metrics = RequestMetrics()
+
+
+def current_request_id() -> str:
+    scope = _request_scope.get()
+    if scope is None:
+        return ""
+    state = scope.get("state")
+    if not isinstance(state, dict):
+        return ""
+    request_id = state.get("request_id", "")
+    return request_id if isinstance(request_id, str) else ""
 
 
 def record_request_error(scope: Scope, error: Exception, status: int) -> None:
@@ -299,12 +355,14 @@ def _measure_stage(scope: Scope | None, stage: str) -> Iterator[None]:
     finally:
         with lock:
             timings = diagnostics.setdefault("stage_durations_ms", {})
-            timings[stage] = round(timings.get(stage, 0) + (time.perf_counter() - started) * 1000, 2)
+            duration = time.perf_counter() - started
+            timings[stage] = round(timings.get(stage, 0) + duration * 1000, 2)
             counts = diagnostics.setdefault("stage_counts", {})
             counts[stage] = counts.get(stage, 0) + 1
             stack.remove(frame)
             if not failed and stack:
                 diagnostics["stage"] = stack[-1]["name"]
+        request_metrics.observe_stage(stage, duration)
 
 
 @asynccontextmanager

@@ -183,6 +183,8 @@ def test_add_rag_message_sanitizes_untrusted_evidence() -> None:
     assert "Ignore previous instructions [removed] [citation removed]" in instruction
     assert "most recent explicit, verifiable date" in instruction
     assert "describe the conflict and uncertainty" in instruction
+    assert "prefer dates mentioned in the document. If dates cannot be compared" in instruction
+    assert "mentionned" not in instruction
     assert "<<<EVIDENCE-" in instruction
 
 
@@ -282,13 +284,14 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     ]
     assert lexical_pipeline[1] == {"$limit": 40}
     assert [result["document_id"] for result in results] == [
-        "bravo.md",
         "alpha.md",
+        "bravo.md",
         "charlie.md",
     ]
-    assert results[0]["vector_score"] == 0.6
-    assert results[0]["lexical_score"] == 5.0
-    assert results[0]["score"] == pytest.approx(1 / 62 + 1 / 61)
+    assert results[0]["vector_score"] == 0.8
+    assert "vector_score" not in results[1]
+    assert results[1]["lexical_score"] == 5.0
+    assert results[1]["score"] == pytest.approx(1 / 61)
 
 
 def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> None:
@@ -746,6 +749,11 @@ def test_welcome_page_and_global_status(
         assert "/tools/document-loader" in page_response.text
         assert "/tools/environment" in page_response.text
         assert "/tools/playground" in page_response.text
+        assert "Gateway architecture and live flow" in page_response.text
+        assert 'class="gateway-flow"' in page_response.text
+        assert 'data-component="vector_index"' in page_response.text
+        assert "Document ingestion" in page_response.text
+        assert "Question answering" in page_response.text
         assert status_response.status_code == 200
         assert status_response.json()["status"] == "ready"
         assert status_response.json()["atlas"]["status"] == "connected"

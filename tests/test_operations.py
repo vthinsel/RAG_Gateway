@@ -6,7 +6,13 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from rag_gateway.observability import ObservabilityMiddleware, RequestMetrics, request_metrics
+from rag_gateway import observability
+from rag_gateway.observability import (
+    ObservabilityMiddleware,
+    RequestMetrics,
+    processing_stage,
+    request_metrics,
+)
 from rag_gateway.operations import OperationsStore
 
 
@@ -179,6 +185,35 @@ def test_observability_middleware_adds_request_id_and_exports_metrics() -> None:
     assert observed["status"] == 200
     assert observed["duration_ms"] >= 0
     assert "must-not-be-recorded" not in repr(snapshot)
+
+
+def test_processing_stages_are_exported_as_prometheus_histograms(monkeypatch) -> None:
+    metrics = RequestMetrics()
+    monkeypatch.setattr(observability, "request_metrics", metrics)
+
+    with processing_stage("embedding"):
+        pass
+    metrics.observe_stage("known-stage", 0.02)
+
+    exposition = metrics.prometheus()
+    assert "# TYPE rag_gateway_processing_stage_duration_seconds histogram" in exposition
+    assert (
+        'rag_gateway_processing_stage_duration_seconds_bucket{stage="embedding",le="+Inf"} 1'
+        in exposition
+    )
+    assert (
+        'rag_gateway_processing_stage_duration_seconds_count{stage="embedding"} 1'
+        in exposition
+    )
+    assert 'rag_gateway_processing_stage_duration_seconds_sum{stage="embedding"}' in exposition
+    assert (
+        'rag_gateway_processing_stage_duration_seconds_bucket{stage="known-stage",le="0.025"} 1'
+        in exposition
+    )
+    assert (
+        'rag_gateway_processing_stage_duration_seconds_bucket{stage="known-stage",le="0.05"} 1'
+        in exposition
+    )
 
 
 def test_request_metrics_exposes_in_flight_requests() -> None:

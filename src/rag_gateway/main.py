@@ -342,14 +342,15 @@ async def _ollama_admin_request(
 ) -> dict[str, Any]:
     base_url = settings.ollama_base_url.rstrip("/").removesuffix("/v1")
     diagnostics = request.scope.setdefault("state", {}).setdefault("diagnostics", {})
-    diagnostics.update({"upstream_host": _host_label(base_url), "upstream_timeout_seconds": 1800.0})
+    timeout = settings.ollama_admin_timeout_seconds
+    diagnostics.update({"upstream_host": _host_label(base_url), "upstream_timeout_seconds": timeout})
     try:
         async with request_stage(request.scope, "ollama_admin"):
             response = await request.app.state.http.request(
                 method,
                 f"{base_url}/api/{endpoint}",
                 json=payload,
-                timeout=1800.0,
+                timeout=timeout,
             )
             diagnostics["upstream_status"] = response.status_code
     except httpx.HTTPError as error:

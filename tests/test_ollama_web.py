@@ -16,13 +16,14 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
         gateway_api_key="admin-key",
         api_key_registry={sha256(b"tenant-key").hexdigest(): ["tenant-a"]},
         ollama_base_url="http://ollama.test:11434/v1",
+        ollama_admin_timeout_seconds=42.5,
     )
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setitem(main.app.dependency_overrides, get_settings, lambda: settings)
-    upstream_requests: list[tuple[str, str, dict[str, Any]]] = []
+    upstream_requests: list[tuple[str, str, dict[str, Any], float | None]] = []
 
     async def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
-        upstream_requests.append((method, url, kwargs.get("json", {})))
+        upstream_requests.append((method, url, kwargs.get("json", {}), kwargs.get("timeout")))
         path = url.removeprefix("http://ollama.test:11434")
         if path == "/api/tags":
             result = {"models": [{"name": "qwen:latest", "size": 1}]}
@@ -131,7 +132,7 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
                 == 422
             )
 
-        assert all("/v1/api/" not in url for _, url, _ in upstream_requests)
+        assert all("/v1/api/" not in url for _, url, _, _ in upstream_requests)
         assert (
             "POST",
             "http://ollama.test:11434/api/pull",
@@ -139,6 +140,7 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
                 "name": "qwen:latest",
                 "stream": False,
             },
+            42.5,
         ) in upstream_requests
         assert (
             "POST",
@@ -148,7 +150,9 @@ def test_ollama_management_page_and_admin_api(monkeypatch) -> None:
                 "modelfile": "FROM qwen:latest\nPARAMETER num_ctx 8192\n",
                 "stream": False,
             },
+            42.5,
         ) in upstream_requests
+        assert all(timeout == 42.5 for _, _, _, timeout in upstream_requests)
     finally:
         main.app.dependency_overrides.pop(get_settings, None)
 
