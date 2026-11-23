@@ -615,11 +615,13 @@ async def gateway_status(
             else "not_configured"
         },
     }
-    if settings.retrieval_hybrid_enabled:
-        status["search_index"] = {
-            "status": "unknown",
-            "name": settings.atlas_search_index,
-        }
+    # Hybrid retrieval can be enabled per request even when it is not the default,
+    # so the Atlas Search index is always reported.
+    status["search_index"] = {
+        "status": "unknown",
+        "name": settings.atlas_search_index,
+        "default_enabled": settings.retrieval_hybrid_enabled,
+    }
 
     store = getattr(request.app.state, "store", None)
     if store is not None or settings.mongodb_uri:
@@ -631,7 +633,13 @@ async def gateway_status(
                 "ready" if index_exists and index_queryable else
                 "building" if index_exists else "missing"
             )
-            if settings.retrieval_hybrid_enabled:
+        except PyMongoError as error:
+            status["atlas"] = {"status": "error", "error": type(error).__name__}
+            status["vector_index"]["status"] = "unavailable"
+            status["search_index"]["status"] = "unavailable"
+            logger.warning("Gateway status Atlas check failed (%s)", type(error).__name__)
+        else:
+            try:
                 search_exists, search_queryable = await run_in_threadpool(
                     store.search_index_status
                 )
@@ -639,15 +647,15 @@ async def gateway_status(
                     "ready" if search_exists and search_queryable else
                     "building" if search_exists else "missing"
                 )
-        except PyMongoError as error:
-            status["atlas"] = {"status": "error", "error": type(error).__name__}
-            status["vector_index"]["status"] = "unavailable"
-            if settings.retrieval_hybrid_enabled:
+            except PyMongoError as error:
                 status["search_index"]["status"] = "unavailable"
-            logger.warning("Gateway status Atlas check failed (%s)", type(error).__name__)
+                logger.warning(
+                    "Gateway status Atlas Search check failed (%s)", type(error).__name__
+                )
     else:
         status["atlas"] = {"status": request.app.state.atlas_status}
         status["vector_index"]["status"] = "unavailable"
+        status["search_index"]["status"] = "unavailable"
 
     parser = OllamaDocumentParser(
         settings.ollama_base_url,

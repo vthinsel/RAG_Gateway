@@ -816,6 +816,9 @@ def test_welcome_page_and_global_status(
         def vector_index_status(self) -> tuple[bool, bool]:
             return True, True
 
+        def search_index_status(self) -> tuple[bool, bool]:
+            return False, False
+
         def close(self) -> None:
             pass
 
@@ -861,6 +864,11 @@ def test_welcome_page_and_global_status(
         assert status_response.json()["atlas"]["status"] == "connected"
         assert status_response.json()["vector_index"]["status"] == "ready"
         assert status_response.json()["ollama"]["status"] == "connected"
+        assert status_response.json()["search_index"] == {
+            "status": "missing",
+            "name": settings.atlas_search_index,
+            "default_enabled": False,
+        }
         assert "embedding-key" not in status_response.text
         assert "test-key" not in status_response.text
     finally:

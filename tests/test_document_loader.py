@@ -760,6 +760,9 @@ async def test_mongodb_recovers_after_startup_without_restart(
         def vector_index_status(self) -> tuple[bool, bool]:
             return True, True
 
+        def search_index_status(self) -> tuple[bool, bool]:
+            return True, True
+
         def list_tenant_ids(self) -> list[str]:
             return ["default"]
 

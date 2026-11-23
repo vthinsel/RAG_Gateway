@@ -96,7 +96,7 @@
     <section aria-labelledby="flow-title">
       <div class="flow-heading">
         <h2 id="flow-title">Gateway architecture and live flow</h2>
-        <span class="flow-note">Component health refreshes with the status check.</span>
+        <span class="flow-note">Component health refreshes automatically every 60 seconds and when you click Refresh status.</span>
       </div>
       <div class="flow-scroll">
         <svg class="gateway-flow" viewBox="0 0 980 420" role="img"
@@ -176,7 +176,7 @@
           <g class="flow-node" data-component="search_index" transform="translate(395 350)">
             <rect width="150" height="42"></rect>
             <text class="node-title" x="75" y="19" text-anchor="middle">Atlas Search</text>
-            <text class="node-status" data-status x="75" y="35" text-anchor="middle">Optional</text>
+            <text class="node-status" data-status x="75" y="35" text-anchor="middle">Checking</text>
           </g>
           <g class="flow-node" transform="translate(790 350)">
             <rect width="150" height="42"></rect>
@@ -184,7 +184,9 @@
           </g>
         </svg>
       </div>
-      <p class="flow-note">Solid lines show the standard path; dashed lines show optional hybrid text retrieval.</p>
+      <p class="flow-note">Solid lines show the standard path; dashed lines show hybrid text retrieval, used by default
+        when RETRIEVAL_HYBRID_ENABLED is on, or per request with <code>hybrid_enabled: true</code>
+        (playground, evaluation, API).</p>
     </section>
     <section aria-labelledby="tools-title">
       <h2 id="tools-title">Gateway tools and endpoints</h2>
@@ -239,8 +241,14 @@
       vector_index: "Atlas vector index",
       ollama: "Ollama",
       mongodb_ai_api: "MongoDB AI Models API",
-      authentication: "Gateway authentication"
+      authentication: "Gateway authentication",
+      search_index: "Atlas Search index"
     };
+    const healthyStates = ["ok", "connected", "ready", "configured"];
+
+    function hybridMode(info) {
+      return info.default_enabled ? "hybrid by default" : "hybrid on request";
+    }
     const overall = document.querySelector("#overall");
     const components = document.querySelector("#components");
     const errorMessage = document.querySelector("#status-error");
@@ -249,16 +257,15 @@
       overall.textContent = data.status.replaceAll("_", " ");
       overall.className = data.status;
       components.replaceChildren();
-      const labels = { ...componentLabels };
-      if (data.search_index) labels.search_index = "Atlas Search index";
-      for (const [key, label] of Object.entries(labels)) {
+      for (const [key, label] of Object.entries(componentLabels)) {
         const info = data[key];
+        if (!info) continue;
         const card = document.createElement("article");
         card.className = "component";
         const title = document.createElement("h3");
         title.textContent = label;
         const state = document.createElement("p");
-        state.className = `state ${["ok", "connected", "ready", "configured"].includes(info.status) ? "ok" : "bad"}`;
+        state.className = `state ${healthyStates.includes(info.status) ? "ok" : "bad"}`;
         state.textContent = info.status.replaceAll("_", " ");
         const details = document.createElement("p");
         details.textContent = key === "application"
@@ -268,7 +275,7 @@
             : key === "vector_index"
               ? `Index: ${info.name}`
               : key === "search_index"
-                ? `Index: ${info.name}`
+                ? `Index: ${info.name} · ${hybridMode(info)}`
               : key === "ollama"
                 ? `${info.endpoint} · ${info.model}${info.models_discovered === undefined ? "" : ` · ${info.models_discovered} model(s) discovered`}`
                 : key === "mongodb_ai_api"
@@ -284,13 +291,17 @@
         if (!info) {
           node.classList.remove("ok", "bad");
           node.classList.add("unknown");
-          state.textContent = "not enabled";
+          state.textContent = "unknown";
           continue;
         }
-        const healthy = ["ok", "connected", "ready", "configured"].includes(info.status);
+        const healthy = healthyStates.includes(info.status);
         node.classList.remove("ok", "bad", "unknown");
-        node.classList.add(healthy ? "ok" : "bad");
-        state.textContent = info.status.replaceAll("_", " ");
+        // An unavailable Atlas Search index only blocks readiness when hybrid is the default.
+        const optional = key === "search_index" && !info.default_enabled;
+        node.classList.add(healthy ? "ok" : optional ? "unknown" : "bad");
+        state.textContent = key === "search_index"
+          ? `${info.status.replaceAll("_", " ")} · ${info.default_enabled ? "default" : "on request"}`
+          : info.status.replaceAll("_", " ");
       }
       document.querySelector("#checked-at").textContent = `Checked ${new Date().toLocaleTimeString()}`;
     }
