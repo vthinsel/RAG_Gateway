@@ -183,7 +183,7 @@
       const has = key => Number.isFinite(timings[key]) || active.name === key;
       const duration = key => Math.max(0, Number(timings[key]) || 0)
         + (active.name === key ? Math.max(0, Number(active.elapsed_ms) || 0) : 0);
-      const fineRetrieval = ["embedding", "atlas_vector", "atlas_vector_rerank", "atlas_lexical"].some(has);
+      const fineRetrieval = ["embedding", "atlas_vector", "atlas_vector_rerank", "atlas_lexical", "atlas_hybrid_rerank"].some(has);
       const ollamaKey = ["ollama_stream", "ollama", "ollama_admin"].find(has) || (info.stream ? "ollama_stream" : "ollama");
       if (!fineRetrieval && !has("retrieval") && !has(ollamaKey)) return null;
       const rows = [];
@@ -192,14 +192,21 @@
         rows.push({ key, label, color, duration: has(key) ? duration(key) : null,
           active: active.name === key, unavailable });
       }
-      const bundledRerank = has("atlas_vector_rerank") || options.rerank_enabled === true;
+      const hybridRerank = has("atlas_hybrid_rerank")
+        || (options.rerank_enabled === true && options.hybrid_enabled === true);
+      const bundledRerank = has("atlas_vector_rerank")
+        || (options.rerank_enabled === true && !hybridRerank);
       if (fineRetrieval) {
         add("embedding", "Embedding", "#087f8c");
         add(bundledRerank ? "atlas_vector_rerank" : "atlas_vector",
           bundledRerank ? "Vector + rerank" : "Atlas vector search", "#3969b0");
         add("atlas_lexical", "Lexical search", "#2d7d46", options.hybrid_enabled === false ? "Not enabled" : pending);
-        rows.push({ key: "reranking", label: "Reranking", color: "#b36a1c", duration: null,
-          unavailable: bundledRerank ? "Included in vector call" : "Not enabled" });
+        if (hybridRerank) {
+          add("atlas_hybrid_rerank", "Reranking fused results", "#b36a1c");
+        } else {
+          rows.push({ key: "reranking", label: "Reranking", color: "#b36a1c", duration: null,
+            unavailable: bundledRerank ? "Included in vector call" : "Not enabled" });
+        }
       } else if (has("retrieval")) {
         add("retrieval", "Retrieval (combined)", "#3969b0");
       }

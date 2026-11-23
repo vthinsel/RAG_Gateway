@@ -269,12 +269,21 @@ async def test_query_stage_timings_are_measured_without_double_counting(
             clock["now"] += 0.01
             return [[0.1]]
 
+    class Database:
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            worker_threads.append(threading.get_ident())
+            calls.append(pipeline)
+            clock["now"] += 0.015
+            return pipeline[0]["$documents"]["$literal"]
+
     class Collection:
+        database = Database()
+
         def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
             worker_threads.append(threading.get_ident())
             calls.append(pipeline)
             if "$vectorSearch" in pipeline[0]:
-                clock["now"] += 0.035 if rerank else 0.02
+                clock["now"] += 0.035 if rerank and not hybrid else 0.02
                 if fail_vector:
                     raise PyMongoError("private-mongodb-error")
                 return [{"_id": "doc", "document_id": "doc", "chunk_index": 0,
@@ -315,15 +324,18 @@ async def test_query_stage_timings_are_measured_without_double_counting(
         assert "ollama" not in timings
     else:
         assert timings["ollama"] == 40
-    vector_key = "atlas_vector_rerank" if rerank else "atlas_vector"
-    assert timings[vector_key] == (35 if rerank else 20)
+    vector_key = "atlas_vector_rerank" if rerank and not hybrid else "atlas_vector"
+    assert timings[vector_key] == (35 if rerank and not hybrid else 20)
     assert ("atlas_lexical" in timings) is (hybrid and not fail_vector)
     if hybrid and not fail_vector:
         assert timings["atlas_lexical"] == 30
+    assert ("atlas_hybrid_rerank" in timings) is (hybrid and rerank and not fail_vector)
+    if hybrid and rerank and not fail_vector:
+        assert timings["atlas_hybrid_rerank"] == 15
     leaf_total = sum(value for key, value in timings.items() if key != "retrieval")
     assert leaf_total == pytest.approx(event["duration_ms"])
     assert timings["retrieval"] == leaf_total - (0 if fail_vector else 40)
-    assert len(calls) == (2 if hybrid and not fail_vector else 1)
+    assert len(calls) == (2 + int(rerank) if hybrid and not fail_vector else 1)
     assert all(worker != event_loop_thread for worker in worker_threads)
     assert "private-query" not in json.dumps(event)
     assert "private-evidence" not in json.dumps(event)

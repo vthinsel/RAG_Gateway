@@ -195,7 +195,9 @@ histogram_quantile(0.95,
 )
 ```
 
-`atlas_vector_rerank` is a combined vector/rerank measurement, not independent
+`atlas_vector_rerank` is a combined vector/rerank measurement for vector-only
+retrieval. Hybrid reranking runs after fusion and is measured separately as
+`atlas_hybrid_rerank`. These are client-visible aggregation durations, not
 database-internal timings. `retrieval` includes its embedding/Atlas child
 stages: do not stack the parent and children together. Buckets have finite
 resolution; no requests means no percentile, not zero latency.
@@ -354,8 +356,9 @@ the trace ID from the monitoring request details/JSON request log. The span
 attribute `rag.request_id` correlates with the response's `X-Request-ID`.
 Request spans use route templates. Child spans cover retrieval, embedding
 batches, Atlas vector/lexical search and generation, including streaming.
-Native reranking is represented by `atlas_vector_rerank` with its model
-attributes; no artificial reranker-only duration is claimed.
+Native reranking is represented by `atlas_vector_rerank` for vector-only retrieval
+or `atlas_hybrid_rerank` for the separate post-fusion hybrid aggregation, with
+model attributes. No artificial split of a combined aggregation is claimed.
 
 Traces do not include prompts, answers, source text, raw URLs, credentials or
 exception messages/stack traces. Error spans retain safe exception type/status.

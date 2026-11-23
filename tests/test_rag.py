@@ -268,7 +268,7 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
         [0.1, 0.2],
         limit=3,
         query="search terms",
-        rerank_enabled=True,
+        rerank_enabled=False,
         hybrid_enabled=True,
     )
 
@@ -276,8 +276,8 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     vector_search = vector_pipeline[0]["$vectorSearch"]
     lexical_search = lexical_pipeline[0]["$search"]
     assert vector_search["filter"] == {"tenant_id": {"$eq": "tenant-a"}}
-    assert vector_search["limit"] == 30
-    assert vector_pipeline[2]["$rerank"]["numDocsToRerank"] == 30
+    assert vector_search["limit"] == 40
+    assert all("$rerank" not in stage for stage in vector_pipeline)
     assert lexical_search["index"] == "text-index"
     assert lexical_search["compound"]["filter"] == [
         {"equals": {"path": "tenant_id", "value": "tenant-a"}}
@@ -292,6 +292,107 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     assert "vector_score" not in results[1]
     assert results[1]["lexical_score"] == 5.0
     assert results[1]["score"] == pytest.approx(1 / 61)
+
+
+
+@pytest.mark.parametrize("winner", ["canonical", "lexical-only"])
+def test_hybrid_reranks_fused_pool_before_selecting_top_k(winner: str) -> None:
+    from copy import deepcopy
+
+    class Database:
+        pipeline: list[dict[str, Any]]
+
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            self.pipeline = pipeline
+            candidates = deepcopy(pipeline[0]["$documents"]["$literal"])
+            # Simulate the server's relevance ordering, independently of RRF order.
+            for candidate in candidates:
+                candidate["rerank_score"] = 0.99 if candidate["_id"] == winner else 0.01
+            return sorted(candidates, key=lambda item: item["rerank_score"], reverse=True)[
+                :pipeline[-1]["$limit"]
+            ]
+
+    class Collection:
+        def __init__(self) -> None:
+            self.database = Database()
+            self.pipelines: list[list[dict[str, Any]]] = []
+
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            self.pipelines.append(pipeline)
+            names = (["canonical", "old-1", "old-2"] if "$vectorSearch" in pipeline[0]
+                     else ["old-1", "old-2", "lexical-only"])
+            return [
+                {"_id": name, "document_id": name, "chunk_index": 0,
+                 "text": "$literal evidence", "metadata": {"value": "$$untrusted"}, "score": 0.9}
+                for name in names
+            ]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = Settings(_env_file=None, retrieval_hybrid_candidates=10,
+                              retrieval_rerank_candidates=4)
+    store.collection = Collection()
+    results = store.search("tenant-a", [0.1], limit=1, query="question",
+                           hybrid_enabled=True, rerank_enabled=True)
+
+    vector, lexical = store.collection.pipelines
+    assert vector[0]["$vectorSearch"]["limit"] == 10
+    assert all("$rerank" not in stage for stage in vector + lexical)
+    pipeline = store.collection.database.pipeline
+    candidates = pipeline[0]["$documents"]["$literal"]
+    assert [item["_id"] for item in candidates] == [
+        "old-1", "old-2", "canonical", "lexical-only"
+    ]
+    assert pipeline[1]["$rerank"] == {
+        "model": "rerank-2.5", "query": {"text": "question"},
+        "path": "text", "numDocsToRerank": 4,
+    }
+    assert results[0]["document_id"] == winner
+    assert results[0]["rerank_score"] == 0.99
+    assert results[0]["text"] == "$literal evidence"
+    assert results[0]["metadata"] == {"value": "$$untrusted"}
+    assert "_id" not in results[0]
+    assert results[0]["score"] == pytest.approx(1 / (61 if winner == "canonical" else 63))
+    assert ("vector_score" in results[0]) is (winner == "canonical")
+    assert ("lexical_score" in results[0]) is (winner == "lexical-only")
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize(("budget", "top_k"), [(3, 2), (1, 3), (1000, 2)])
+def test_hybrid_rerank_bounds_fused_pool_and_skips_empty_results(
+    empty: bool, budget: int, top_k: int,
+) -> None:
+    class Database:
+        pipeline: list[dict[str, Any]] | None = None
+
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            self.pipeline = pipeline
+            return pipeline[0]["$documents"]["$literal"][:pipeline[-1]["$limit"]]
+
+    class Collection:
+        database = Database()
+
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            prefix = "vector" if "$vectorSearch" in pipeline[0] else "lexical"
+            return [] if empty else [
+                {"_id": f"{prefix}-{i}", "document_id": f"{prefix}-{i}", "chunk_index": 0,
+                     "text": "evidence", "score": 0.9} for i in range(5)
+            ]
+
+    store = AtlasStore.__new__(AtlasStore)
+    store.settings = Settings(_env_file=None, retrieval_hybrid_candidates=5,
+                              retrieval_rerank_candidates=budget)
+    store.collection = Collection()
+    results = store.search("tenant-a", [0.1], limit=top_k, query="question",
+                           hybrid_enabled=True, rerank_enabled=True)
+    pipeline = store.collection.database.pipeline
+    if empty:
+        assert results == []
+        assert pipeline is None
+    else:
+        assert pipeline is not None
+        assert len(pipeline[0]["$documents"]["$literal"]) == min(10, max(budget, top_k))
+        assert pipeline[1]["$rerank"]["numDocsToRerank"] == max(budget, top_k)
+        assert len(results) == top_k
 
 
 def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> None:

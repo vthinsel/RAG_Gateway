@@ -32,10 +32,11 @@ from rag_gateway.telemetry import (
 from rag_gateway.voyage import VoyageEmbedder
 
 
+@pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("endpoint", ["/v1/chat/completions", "/v1/api/chat"])
 async def test_chat_traces_and_persists_each_model_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool, endpoint: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool, endpoint: str, hybrid: bool,
 ) -> None:
     settings = Settings(
         _env_file=None, gateway_api_key="test-admin", mongodb_api_key="private-api-key",
@@ -43,6 +44,7 @@ async def test_chat_traces_and_persists_each_model_call(
         voyage_embedding_model="embedding-model", embedding_dimensions=2,
         ollama_model="chat-model", ollama_base_url="http://upstream.test/v1",
         retrieval_rerank_enabled=True, retrieval_rerank_model="rerank-model",
+        retrieval_hybrid_enabled=hybrid,
         operations_db_path=tmp_path / "ops.sqlite3",
         model_pricing={
             "mongodb_ai:embedding:embedding-model": {"input_per_million_usd": 0.1},
@@ -82,7 +84,14 @@ async def test_chat_traces_and_persists_each_model_call(
             "usage": upstream_usage,
         })
 
+    class Database:
+        def aggregate(self, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**item, "rerank_score": 0.8}
+                    for item in pipeline[0]["$documents"]["$literal"]]
+
     class Collection:
+        database = Database()
+
         def aggregate(self, _pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [{
                 "document_id": "doc", "chunk_index": 0, "text": "private-evidence",
@@ -149,7 +158,9 @@ async def test_chat_traces_and_persists_each_model_call(
     assert root.parent.span_id == int("2222222222222222", 16)
     assert root.context.trace_id == int("1" * 32, 16)
     assert by_name["embedding"].parent.span_id == by_name["retrieval"].context.span_id
-    assert by_name["atlas_vector_rerank"].parent.span_id == by_name["retrieval"].context.span_id
+    rerank_stage = "atlas_hybrid_rerank" if hybrid else "atlas_vector_rerank"
+    assert by_name[rerank_stage].parent.span_id == by_name["retrieval"].context.span_id
+    assert by_name[rerank_stage].attributes["gen_ai.request.model"] == "rerank-model"
     assert by_name["ollama_stream" if stream else "ollama"].parent.span_id == root.context.span_id
     assert root.attributes["rag.request_id"] == "usage-request"
     assert all("traceparent" in request.headers for request in requests)

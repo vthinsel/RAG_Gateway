@@ -33,7 +33,7 @@ Open either file with [diagrams.net](https://app.diagrams.net/) or a VS Code Dra
 
 The default embedding model is `voyage-3.5`, requested through MongoDB's AI Models API, with 1024 dimensions. Verify model availability and dimensions for your MongoDB AI endpoint before creating the index. The model, `EMBEDDING_DIMENSIONS`, and Atlas index must agree exactly. Do not silently change only one of them.
 
-The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns and uses tenant-filtered Atlas vector search. Optional hybrid search adds tenant-filtered Atlas Search text results and combines both ranked lists with reciprocal-rank fusion; it is disabled by default and requires the `rag_chunks_text` Atlas Search index. Set `RETRIEVAL_HYBRID_ENABLED=true` or send `hybrid_enabled: true` per request. Optional Atlas Native Reranking can reorder vector candidates and requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings. Reranking sends the query and candidate text to MongoDB's reranking service; review its current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases, with rerank and hybrid settings stored on each run; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync and document-level ACL filtering remain later phases.
+The basic ingester handles UTF-8 `.txt` and `.md` files. An optional document loader adds recursive directory scanning, pre-ingestion extracted-text previews, and support for common document and image formats, using the configured Ollama OCR model for PDF pages and images. Retrieval considers the latest three user turns and uses tenant-filtered Atlas vector search. Optional hybrid search adds tenant-filtered Atlas Search text results and combines both ranked lists with reciprocal-rank fusion; it is disabled by default and requires the `rag_chunks_text` Atlas Search index. Set `RETRIEVAL_HYBRID_ENABLED=true` or send `hybrid_enabled: true` per request. Optional Atlas Native Reranking reorders vector candidates (or the fused candidate pool when hybrid search is enabled) and requires MongoDB 9.0+ and Native Reranking enabled in Atlas project settings. Reranking sends the query and candidate text to MongoDB's reranking service; review its current terms and data boundary. The retrieval evaluation workbench measures hit rate, recall, reciprocal rank, and latency against manually labeled question/document cases, with rerank and hybrid settings stored on each run; it does not grade generated answers. Embedding requests to the configured MongoDB AI model endpoint use item and estimated-token batching with retries for transient errors. Scheduled sync and document-level ACL filtering remain later phases.
 
 ## Build Plan
 
@@ -149,7 +149,7 @@ The dimensions in the index must match the configured embedding model output and
 
 ### Configure Atlas Search for Hybrid Retrieval
 
-Hybrid retrieval uses two indexes on the same collection: the Vector Search index above and a separate Atlas Search index. In Atlas Data Explorer, create a Search index using [`infra/atlas-search-index.json`](infra/atlas-search-index.json), name it `rag_chunks_text` (or set `ATLAS_SEARCH_INDEX` to another name), and wait until it is queryable. The definition indexes `text` with `lucene.standard` and `tenant_id` as a token field for exact tenant filtering. Enable hybrid retrieval with `RETRIEVAL_HYBRID_ENABLED=true`, or pass `hybrid_enabled: true` to `POST /v1/retrieve` or chat requests. `RETRIEVAL_HYBRID_CANDIDATES` controls the maximum candidates from each branch before fusion. Hybrid `score` is an RRF score and is not comparable to the vector-only `RETRIEVAL_MIN_SCORE`; the minimum applies to the vector branch before fusion, while lexical-only matches remain eligible. Branch scores are returned as `vector_score` and `lexical_score` when available.
+Hybrid retrieval uses two indexes on the same collection: the Vector Search index above and a separate Atlas Search index. In Atlas Data Explorer, create a Search index using [`infra/atlas-search-index.json`](infra/atlas-search-index.json), name it `rag_chunks_text` (or set `ATLAS_SEARCH_INDEX` to another name), and wait until it is queryable. The definition indexes `text` with `lucene.standard` and `tenant_id` as a token field for exact tenant filtering. Enable hybrid retrieval with `RETRIEVAL_HYBRID_ENABLED=true`, or pass `hybrid_enabled: true` to `POST /v1/retrieve` or chat requests. `RETRIEVAL_HYBRID_CANDIDATES` controls the maximum candidates from each branch before fusion. Hybrid `score` is an RRF score and is not comparable to the vector-only `RETRIEVAL_MIN_SCORE`; the minimum applies to the vector branch before fusion, while lexical-only matches remain eligible. Branch scores are returned as `vector_score` and `lexical_score` when available. With reranking enabled, both branches are retrieved without reranking, fused and deduplicated, and the highest-ranked fused candidates (up to `RETRIEVAL_RERANK_CANDIDATES`, or top K if larger) are sent together to Atlas `$rerank` before selecting the final top K. Lexical-only candidates participate in reranking. Fusion remains in the Gateway; a database-level `$documents` aggregation passes the exact fused passages to Atlas without fetching them again. The returned `score` preserves the RRF score, while `rerank_score` records final relevance; results follow reranker order.
 
 ### Ingest local files
 
@@ -325,9 +325,10 @@ ID when emitted during a request.
 Each query has a stacked time-contribution chart in the live monitor, with stage
 durations, percentages and the current stage's elapsed time. Embedding, Atlas
 vector search, lexical search and Ollama are measured independently. Native
-Atlas `$rerank` executes inside the vector aggregation, so its client-visible
-duration is shown as **Vector + rerank**; reranking is explicitly marked as
-included, not given an invented independent duration. No extra search or explain
+For vector-only retrieval, Atlas `$rerank` executes inside the vector aggregation,
+so its client-visible duration is shown as **Vector + rerank**. For hybrid retrieval,
+reranking executes after fusion in a separate aggregation and is measured as
+**Reranking fused results** (`atlas_hybrid_rerank`). No extra search or explain
 requests are issued to estimate a split.
 
 These are Gateway-observed wall-clock durations: embedding includes the embedding
@@ -392,7 +393,7 @@ The authenticated settings editor is available at `/tools/environment`. Enter th
 | `RETRIEVAL_MIN_SCORE` | `0.72` | Minimum Atlas vector score accepted as evidence; calibrate against an evaluation set |
 | `RETRIEVAL_RERANK_ENABLED` | `false` | Enables the Atlas `$rerank` stage after vector search |
 | `RETRIEVAL_RERANK_MODEL` | `rerank-2.5` | Voyage reranking model used when reranking is enabled |
-| `RETRIEVAL_RERANK_CANDIDATES` | `100` | Maximum vector-search results sent to `$rerank` (1–1,000) |
+| `RETRIEVAL_RERANK_CANDIDATES` | `100` | Maximum vector-only or fused hybrid candidates sent to `$rerank` (1–1,000; at least top K) |
 | `RETRIEVAL_HYBRID_ENABLED` | `false` | Enables tenant-filtered vector + Atlas Search fusion |
 | `RETRIEVAL_HYBRID_CANDIDATES` | `100` | Maximum candidates from each hybrid search branch (1–1,000) |
 | `API_KEY_REGISTRY` | `{}` | JSON map of SHA-256 bearer-key hashes to allowed tenant IDs; overrides the shared key when non-empty |

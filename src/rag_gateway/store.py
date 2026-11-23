@@ -258,9 +258,8 @@ class AtlasStore:
             self.settings.retrieval_min_score
             if retrieval_min_score is None else retrieval_min_score
         )
-        if hybrid_enabled and rerank_enabled:
-            vector_limit = min(hybrid_limit, rerank_limit)
-        elif hybrid_enabled:
+        vector_rerank_enabled = rerank_enabled and not hybrid_enabled
+        if hybrid_enabled:
             vector_limit = hybrid_limit
         elif rerank_enabled:
             vector_limit = rerank_limit
@@ -292,7 +291,7 @@ class AtlasStore:
                 }
             },
         ]
-        if rerank_enabled:
+        if vector_rerank_enabled:
             pipeline.extend(
                 [
                     {
@@ -306,15 +305,15 @@ class AtlasStore:
                     {"$addFields": {"rerank_score": {"$meta": "score"}}},
                 ]
             )
-        with processing_stage("atlas_vector_rerank" if rerank_enabled else "atlas_vector"):
-            if rerank_enabled:
+        with processing_stage("atlas_vector_rerank" if vector_rerank_enabled else "atlas_vector"):
+            if vector_rerank_enabled:
                 annotate_model_span("atlas", "rerank", self.settings.retrieval_rerank_model)
             rerank_outcome = "error"
             try:
                 vector_candidates = list(self.collection.aggregate(pipeline))
                 rerank_outcome = "success"
             finally:
-                if rerank_enabled:
+                if vector_rerank_enabled:
                     record_model_usage(
                         "atlas", "rerank", self.settings.retrieval_rerank_model,
                         None, rerank_outcome, tenant_id=tenant_id,
@@ -366,6 +365,33 @@ class AtlasStore:
                     result[score_field] = candidate.get("score")
                     result["score"] += 1 / (60 + rank)
             results = sorted(fused.values(), key=lambda item: item["score"], reverse=True)
+            if rerank_enabled and results:
+                # Rerank the fused pool, including lexical-only candidates, before top K.
+                # $literal preserves evidence/metadata containing MongoDB expression syntax.
+                rerank_pipeline = [
+                    {"$documents": {"$literal": results[:rerank_limit]}},
+                    {
+                        "$rerank": {
+                            "model": self.settings.retrieval_rerank_model,
+                            "query": {"text": query},
+                            "path": "text",
+                            "numDocsToRerank": rerank_limit,
+                        }
+                    },
+                    {"$addFields": {"rerank_score": {"$meta": "score"}}},
+                    {"$limit": limit},
+                ]
+                with processing_stage("atlas_hybrid_rerank"):
+                    annotate_model_span("atlas", "rerank", self.settings.retrieval_rerank_model)
+                    rerank_outcome = "error"
+                    try:
+                        results = list(self.collection.database.aggregate(rerank_pipeline))
+                        rerank_outcome = "success"
+                    finally:
+                        record_model_usage(
+                            "atlas", "rerank", self.settings.retrieval_rerank_model,
+                            None, rerank_outcome, tenant_id=tenant_id,
+                        )
             for result in results:
                 result.pop("_id", None)
             return results[:limit]
