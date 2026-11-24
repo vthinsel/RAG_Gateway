@@ -664,7 +664,7 @@ async def test_lifespan_logs_ollama_models_and_atlas_connection(
     assert "Atlas Vector Search index is ready: name=rag_chunks_vector" in caplog.text
     assert "Atlas collection tenants: default, lab" in caplog.text
     assert "Configured Ollama chat model 'qwen2.5:7b' is installed" in caplog.text
-    assert "MongoDB AI API model check succeeded: model=voyage-3.5 dimensions=1024" in caplog.text
+    assert "MongoDB AI API model check succeeded: model=voyage-4 dimensions=1024" in caplog.text
     assert len(captured_requests) == 1
     assert captured_requests[0].url == "https://ai.mongodb.com/v1/embeddings"
     assert captured_requests[0].headers["Authorization"] == "Bearer " + settings.mongodb_api_key

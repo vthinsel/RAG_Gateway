@@ -29,7 +29,7 @@ flowchart LR
 The design favors local control where it matters most to interactive use, while using managed services for retrieval infrastructure:
 
 - **Local generation:** Ollama serves the chat model on the configured local or controlled host. Chat prompts and generated answers go to that service rather than to a hosted generation API.
-- **Semantic embeddings:** the default `voyage-3.5` model, called through MongoDB's AI Models API, turns both passages and questions into 1024-dimensional vectors. This gives retrieval a purpose-built semantic representation rather than relying only on exact word matches.
+- **Semantic embeddings:** the default `voyage-4` model, called through MongoDB's AI Models API, turns both passages and questions into 1024-dimensional vectors. This gives retrieval a purpose-built semantic representation rather than relying only on exact word matches.
 - **Managed retrieval:** MongoDB Atlas stores chunks, metadata, and vectors, and runs tenant-filtered vector search plus optional lexical search.
 - **A compatible gateway:** FastAPI handles ingestion, retrieval, prompt assembly, authentication, and OpenAI/Ollama-compatible chat routes. Clients select the public model name `rag-local`; the gateway chooses the configured Ollama model behind it.
 

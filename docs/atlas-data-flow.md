@@ -85,7 +85,7 @@ document with this shape:
     "department": "people"
   },
   "embedding": ["<1024 floating-point values>"],
-  "embedding_model": "voyage-3.5",
+  "embedding_model": "voyage-4",
   "embedding_dim": 1024,
   "chunk_policy": "char-v1:1200:150",
   "content_sha256": "<sha256 of this chunk text>",
@@ -131,7 +131,7 @@ from the Atlas Vector Search index described below.
 
 The configured embedding service is called at
 `{MONGODB_API_MODEL_ENDPOINT}/v1/embeddings` with a bearer API key. The default
-endpoint host is `ai.mongodb.com`; the default model is `voyage-3.5`.
+endpoint host is `ai.mongodb.com`; the default model is `voyage-4`.
 
 For document ingestion, the gateway sends each chunk with `input_type: "document"`.
 For retrieval, it embeds the query with `input_type: "query"`. Both uses must have
@@ -178,9 +178,10 @@ repository's index definition is
 The vector's `numDimensions` must agree with the selected model's output and
 `EMBEDDING_DIMENSIONS`. If any of these differ, vector writes or searches can fail.
 The filter fields declare which stored values can be used as Atlas Search filters.
-The current gateway search applies `tenant_id`; the other filter fields are stored
-for identification/future filtering but are not currently included in its search
-filter.
+Vector search filters by `tenant_id` and `embedding_model`. Chunks enter the
+vector candidate pool only when their model matches `VOYAGE_EMBEDDING_MODEL`.
+The lexical branch of hybrid retrieval filters by tenant and can still return
+text from chunks indexed with a different embedding model.
 
 The gateway checks the configured index name and whether it is queryable during
 startup/status checks. It does not create, update, or migrate the Vector Search
@@ -233,7 +234,8 @@ to the configured collection. Its `$vectorSearch` stage uses:
 - `index`: `ATLAS_VECTOR_INDEX`
 - `path`: `embedding`
 - `queryVector`: the newly generated query vector
-- `filter`: `tenant_id` equals the selected tenant
+- `filter`: `tenant_id` equals the selected tenant and `embedding_model` equals
+  `VOYAGE_EMBEDDING_MODEL`
 - `limit`: the requested `top_k` for vector-only retrieval; the larger of
   `top_k` and the configured candidate count when reranking or hybrid retrieval
   is enabled. If both are enabled, the vector branch uses the smaller of the
@@ -336,7 +338,7 @@ MongoDB Atlas remains the source of truth for ingested chunks and embeddings.
 | `ATLAS_SEARCH_INDEX` | `rag_chunks_text` | Atlas Search index name used for hybrid retrieval |
 | `MONGODB_API_MODEL_ENDPOINT` | `ai.mongodb.com` | Embedding API endpoint host |
 | `MONGODB_API_KEY` | empty | Bearer credential for embedding requests |
-| `VOYAGE_EMBEDDING_MODEL` | `voyage-3.5` | Model used for document and query embeddings |
+| `VOYAGE_EMBEDDING_MODEL` | `voyage-4` | Model used for document and query embeddings |
 | `EMBEDDING_DIMENSIONS` | `1024` | Must match model output and vector index |
 | `EMBEDDING_BATCH_SIZE` | `64` | Maximum embedding items per request (hard cap 128) |
 | `CHUNK_SIZE` | `1200` | Target character length per chunk |

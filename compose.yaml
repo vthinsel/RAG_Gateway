@@ -51,7 +51,7 @@ services:
 
       # Optional Atlas Native Reranking (requires MongoDB 9.0+ and project-level enablement).
       RETRIEVAL_RERANK_ENABLED: "true"
-      RETRIEVAL_RERANK_MODE: "rerank-3"
+      RETRIEVAL_RERANK_MODEL: "rerank-3"
       RETRIEVAL_RERANK_CANDIDATES: "100"
       
       # Optional hybrid search

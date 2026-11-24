@@ -188,7 +188,7 @@ def test_add_rag_message_sanitizes_untrusted_evidence() -> None:
     assert "<<<EVIDENCE-" in instruction
 
 
-def test_vector_search_pipeline_filters_by_tenant() -> None:
+def test_vector_search_pipeline_filters_by_tenant_and_embedding_model() -> None:
     class Collection:
         pipeline: list[dict] | None = None
 
@@ -202,6 +202,7 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
         atlas_vector_index="test-index",
+        voyage_embedding_model="test-embedding-model",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
         retrieval_rerank_enabled=False,
@@ -214,7 +215,12 @@ def test_vector_search_pipeline_filters_by_tenant() -> None:
 
     assert store.collection.pipeline is not None
     vector_search = store.collection.pipeline[0]["$vectorSearch"]
-    assert vector_search["filter"] == {"tenant_id": {"$eq": "tenant-a"}}
+    assert vector_search["filter"] == {
+        "$and": [
+            {"tenant_id": {"$eq": "tenant-a"}},
+            {"embedding_model": {"$eq": "test-embedding-model"}},
+        ]
+    }
     assert vector_search["limit"] == 3
     assert len(store.collection.pipeline) == 2
     assert [result["document_id"] for result in results] == ["high-score.md"]
@@ -252,6 +258,7 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
         atlas_vector_index="vector-index",
+        voyage_embedding_model="test-embedding-model",
         atlas_search_index="text-index",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
@@ -275,7 +282,12 @@ def test_hybrid_search_fuses_vector_and_lexical_results_by_tenant() -> None:
     vector_pipeline, lexical_pipeline = store.collection.pipelines
     vector_search = vector_pipeline[0]["$vectorSearch"]
     lexical_search = lexical_pipeline[0]["$search"]
-    assert vector_search["filter"] == {"tenant_id": {"$eq": "tenant-a"}}
+    assert vector_search["filter"] == {
+        "$and": [
+            {"tenant_id": {"$eq": "tenant-a"}},
+            {"embedding_model": {"$eq": "test-embedding-model"}},
+        ]
+    }
     assert vector_search["limit"] == 40
     assert all("$rerank" not in stage for stage in vector_pipeline)
     assert lexical_search["index"] == "text-index"
@@ -410,6 +422,7 @@ def test_vector_search_reranks_candidate_pool_and_preserves_vector_score() -> No
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
         atlas_vector_index="test-index",
+        voyage_embedding_model="test-embedding-model",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
         retrieval_rerank_enabled=True,
@@ -450,6 +463,7 @@ def test_vector_search_can_disable_configured_reranking() -> None:
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
         atlas_vector_index="test-index",
+        voyage_embedding_model="test-embedding-model",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
         retrieval_rerank_enabled=True,
@@ -745,6 +759,7 @@ def test_vector_search_logs_best_score_when_threshold_filters_all(
     store = AtlasStore.__new__(AtlasStore)
     store.settings = SimpleNamespace(
         atlas_vector_index="test-index",
+        voyage_embedding_model="test-embedding-model",
         retrieval_num_candidates=50,
         retrieval_min_score=0.72,
         retrieval_rerank_enabled=False,

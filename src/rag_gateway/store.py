@@ -277,7 +277,12 @@ class AtlasStore:
                         vector_limit,
                     ),
                     "limit": vector_limit,
-                    "filter": {"tenant_id": {"$eq": tenant_id}},
+                    "filter": {
+                        "$and": [
+                            {"tenant_id": {"$eq": tenant_id}},
+                            {"embedding_model": {"$eq": self.settings.voyage_embedding_model}},
+                        ]
+                    },
                 }
             },
             {
