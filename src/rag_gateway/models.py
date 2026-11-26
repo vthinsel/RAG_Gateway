@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class IngestDocument(BaseModel):
@@ -79,6 +79,7 @@ class RetrievalEvaluationCase(BaseModel):
 
     query: str = Field(min_length=1, max_length=8000)
     expected_document_ids: list[str] = Field(min_length=1, max_length=50)
+    expected_answer: str | None = Field(default=None, max_length=8000)
 
     @field_validator("query")
     @classmethod
@@ -96,6 +97,15 @@ class RetrievalEvaluationCase(BaseModel):
             raise ValueError("Expected document IDs must not be blank")
         return list(dict.fromkeys(normalized))
 
+    @field_validator("expected_answer")
+    @classmethod
+    def validate_expected_answer(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise ValueError("Expected answer must not be blank")
+        return value
+
 
 class RequestOverrides(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0, strict=True)
@@ -111,3 +121,10 @@ class RetrievalEvaluationRequest(RequestOverrides):
     top_k: int = Field(default=5, ge=1, le=50)
     rerank_enabled: bool | None = None
     hybrid_enabled: bool | None = None
+    answer_quality: bool = False
+
+    @model_validator(mode="after")
+    def validate_answer_quality(self) -> "RetrievalEvaluationRequest":
+        if self.answer_quality and any(case.expected_answer is None for case in self.cases):
+            raise ValueError("Each case needs an expected_answer for answer-quality evaluation")
+        return self

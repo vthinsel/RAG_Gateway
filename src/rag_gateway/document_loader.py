@@ -153,18 +153,41 @@ class _VisibleTextParser(html.parser.HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._hidden_depth = 0
+        self._heading_tag: str | None = None
+        self._heading_parts: list[str] = []
+        self._has_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() in {"script", "style", "noscript"}:
+        tag = tag.casefold()
+        if tag in {"script", "style", "noscript"}:
             self._hidden_depth += 1
+        elif not self._hidden_depth and self._heading_tag is None and tag in {
+            "title", "h1", "h2", "h3", "h4", "h5", "h6",
+        }:
+            self._heading_tag = tag
+            self._heading_parts = []
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() in {"script", "style", "noscript"} and self._hidden_depth:
+        tag = tag.casefold()
+        if tag in {"script", "style", "noscript"} and self._hidden_depth:
             self._hidden_depth -= 1
+        elif not self._hidden_depth and tag == self._heading_tag:
+            title = " ".join("".join(self._heading_parts).split())
+            if title:
+                if tag == "title":
+                    level = 1
+                    self._has_title = True
+                else:
+                    level = min(int(tag[1]) + int(self._has_title), 6)
+                self.parts.append(f"{'#' * level} {title}")
+            self._heading_tag = None
 
     def handle_data(self, data: str) -> None:
-        if not self._hidden_depth and data.strip():
-            self.parts.append(data.strip())
+        if not self._hidden_depth:
+            if self._heading_tag is not None:
+                self._heading_parts.append(data)
+            elif data.strip():
+                self.parts.append(data.strip())
 
 
 class OllamaDocumentParser:
@@ -262,7 +285,18 @@ class OllamaDocumentParser:
             raise RuntimeError("Install python-docx to parse DOCX files") from error
 
         document = Document(path)
-        sections = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+        sections = []
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            style_id = paragraph.style.style_id if paragraph.style else ""
+            if style_id == "Title":
+                text = f"# {' '.join(text.split())}"
+            elif style_id.startswith("Heading") and style_id[7:].isdigit():
+                level = min(int(style_id[7:]) + 1, 6)
+                text = f"{'#' * level} {' '.join(text.split())}"
+            sections.append(text)
         for table_index, table in enumerate(document.tables, start=1):
             rows = [" | ".join(cell.text.strip().replace("\n", " ") for cell in row.cells) for row in table.rows]
             sections.append(f"Table {table_index}\n" + "\n".join(rows))
@@ -301,7 +335,12 @@ class OllamaDocumentParser:
         slides = []
         for slide_number, slide in enumerate(presentation.slides, start=1):
             parts = []
+            title = slide.shapes.title
+            if title is not None and title.has_text_frame and title.text.strip():
+                parts.append(f"### {' '.join(title.text.split())}")
             for shape in slide.shapes:
+                if title is not None and shape.shape_id == title.shape_id:
+                    continue
                 if getattr(shape, "has_text_frame", False) and shape.text.strip():
                     parts.append(shape.text.strip())
                 if getattr(shape, "has_table", False):

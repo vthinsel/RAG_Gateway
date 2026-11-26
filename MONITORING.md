@@ -77,6 +77,8 @@ intend to treat as free. Unconfigured prices do not imply zero cost.
   usage snapshot is saved once, not added repeatedly. An older upstream may
   omit usage; the ledger then records missing usage. Failed calls and streams
   without `[DONE]` are retained as failed/incomplete rather than zero usage.
+- `ollama:evaluation_judge:<model>` records each local answer-quality judge call;
+  its answer generation is recorded separately as `ollama:generation:<model>`.
 - `atlas:rerank:<model>` records native reranking aggregations. Atlas does not
   return reranking token usage through this path, so token counts stay unknown.
   Configure a fixed per-invocation estimate only if appropriate to your pricing

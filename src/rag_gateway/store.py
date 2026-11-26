@@ -6,6 +6,7 @@ from typing import Any
 
 from pymongo import MongoClient, ReplaceOne
 
+from rag_gateway.chunking import chunk_policy
 from rag_gateway.config import Settings
 from rag_gateway.observability import current_request_id, processing_stage
 from rag_gateway.telemetry import annotate_model_span, record_model_usage
@@ -149,7 +150,7 @@ class AtlasStore:
             and document.get("embedding_model") == self.settings.voyage_embedding_model
             and document.get("embedding_dim") == self.settings.embedding_dimensions
             and document.get("chunk_policy")
-            == f"char-v1:{self.settings.chunk_size}:{self.settings.chunk_overlap}"
+            == chunk_policy(self.settings.chunk_size, self.settings.chunk_overlap)
             and document.get("metadata", {}).get("parser_model") == parser_model
         )
 
@@ -211,9 +212,7 @@ class AtlasStore:
                 "embedding": embedding,
                 "embedding_model": self.settings.voyage_embedding_model,
                 "embedding_dim": self.settings.embedding_dimensions,
-                "chunk_policy": (
-                    f"char-v1:{self.settings.chunk_size}:{self.settings.chunk_overlap}"
-                ),
+                "chunk_policy": chunk_policy(self.settings.chunk_size, self.settings.chunk_overlap),
                 "content_sha256": sha256(text.encode()).hexdigest(),
                 "source_file_sha256": source_file_sha256,
                 "updated_at": now,

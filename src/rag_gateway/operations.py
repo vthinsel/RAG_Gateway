@@ -428,12 +428,15 @@ def _evaluation_run_name(
 
 
 def _evaluation_dataset_hash(result: dict[str, Any]) -> str:
-    dataset = sorted(
-        (
-            case["query"],
-            sorted(case["expected_document_ids"]),
+    if result.get("answer_quality"):
+        dataset = sorted(
+            (case["query"], sorted(case["expected_document_ids"]), case["expected_answer"])
+            for case in result["cases"]
         )
-        for case in result["cases"]
-    )
+    else:
+        dataset = sorted(
+            (case["query"], sorted(case["expected_document_ids"]))
+            for case in result["cases"]
+        )
     serialized = json.dumps(dataset, ensure_ascii=False, separators=(",", ":"))
     return sha256(serialized.encode("utf-8")).hexdigest()

@@ -16,9 +16,9 @@ These are the remaining improvement ideas not included in the current change.
 
 - [ ] Validate generated citations against the retrieved source set and report citation coverage or invalid citations.
 - [ ] Return a deterministic insufficient-evidence response when retrieval yields no usable sources.
-- [ ] Extend the evaluation workbench with answer correctness, faithfulness, and citation-quality evaluations.
+- [x] Extend the evaluation workbench with answer correctness, faithfulness, and citation-quality evaluations.
 - [ ] Add user feedback linked to request IDs and make it available for quality analysis.
-- [ ] Preserve document headings and titles in chunks to provide better retrieval context.
+- [x] Preserve document headings and titles in chunks to provide better retrieval context.
 
 ## Performance and retrieval
 

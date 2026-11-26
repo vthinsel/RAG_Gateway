@@ -5,14 +5,14 @@ import os
 import secrets
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -37,6 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.types import Scope
 
+from rag_gateway.answer_evaluation import AnswerJudgment, citation_statistics, judge_messages
 from rag_gateway.chunking import chunk_text
 from rag_gateway.config import Settings, get_settings
 from rag_gateway.document_loader import (
@@ -86,6 +87,7 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 MAX_UPLOAD_FILES = 500
 MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
+_CompletionResult = TypeVar("_CompletionResult")
 
 
 def _host_label(url: str) -> str:
@@ -1731,6 +1733,92 @@ async def retrieve(
     return {"data": sources}
 
 
+async def _evaluation_completion(
+    request: Request,
+    settings: Settings,
+    payload: dict[str, Any],
+    tenant_id: str,
+    operation: str,
+    parse: Callable[[str], _CompletionResult],
+) -> _CompletionResult:
+    usage: Any = None
+    outcome = "error"
+    try:
+        async with request_stage(request.scope, "ollama"):
+            annotate_model_span("ollama", operation, settings.ollama_model)
+            response = await request.app.state.http.post(
+                f"{settings.ollama_base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=trace_headers(),
+            )
+            response.raise_for_status()
+            try:
+                data = response.json()
+            except ValueError as error:
+                raise HTTPException(status_code=502, detail="Ollama returned invalid JSON") from error
+            if not isinstance(data, dict):
+                raise HTTPException(status_code=502, detail="Ollama returned an unexpected response")
+            usage = data.get("usage")
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise RuntimeError("Invalid Ollama completion")
+            message = choices[0].get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("Empty Ollama completion")
+            parsed = parse(content.strip())
+            outcome = "success"
+            return parsed
+    finally:
+        await persist_model_usage(
+            "ollama", operation, settings.ollama_model, usage, outcome, tenant_id=tenant_id,
+        )
+
+
+async def _evaluate_answer_quality(
+    request: Request,
+    settings: Settings,
+    tenant_id: str,
+    query: str,
+    expected_answer: str,
+    sources: list[dict[str, Any]],
+    temperature: float | None,
+) -> dict[str, Any]:
+    if any(not isinstance(source.get("text"), str) for source in sources):
+        raise RuntimeError("Retrieved source has no text")
+    messages = add_rag_system_message([{"role": "user", "content": query}], sources)
+    generation_payload = _chat_payload({"temperature": temperature}, messages, settings)
+    answer = await _evaluation_completion(
+        request, settings, generation_payload, tenant_id, "generation", str,
+    )
+    citations = citation_statistics(answer, len(sources))
+    payload = _chat_payload(
+        {"temperature": 0.0, "response_format": {"type": "json_object"}},
+        judge_messages(query, expected_answer, answer, sources),
+        settings,
+    )
+    def parse_judgment(content: str) -> AnswerJudgment:
+        try:
+            judgment = AnswerJudgment.model_validate_json(content)
+        except ValidationError as error:
+            raise HTTPException(
+                status_code=502, detail="Ollama returned an invalid evaluation judgment"
+            ) from error
+        if citations["valid"] and judgment.citation_support is None:
+            raise HTTPException(status_code=502, detail="Ollama returned an invalid evaluation judgment")
+        return judgment
+
+    judgment = await _evaluation_completion(
+        request, settings, payload, tenant_id, "evaluation_judge", parse_judgment,
+    )
+    scores = judgment.model_dump()
+    if not citations["valid"]:
+        scores["citation_support"] = None
+        if scores["citation_coverage"] is not None:
+            scores["citation_coverage"] = 0.0
+    return {"answer": answer, "citations": citations, **scores}
+
+
 @app.post("/v1/evaluations/retrieval")
 async def evaluate_retrieval(
     body: RetrievalEvaluationRequest,
@@ -1761,6 +1849,8 @@ async def evaluate_retrieval(
         f"tenant={tenant_id} | rerank={'on' if rerank_enabled else 'off'} "
         f"| hybrid={'on' if hybrid_enabled else 'off'}"
     )
+    if body.answer_quality:
+        run_name += " | answer-quality=on"
     cases = []
     cases_with_hits = 0
     matched_relevant_documents = 0
@@ -1791,11 +1881,20 @@ async def evaluate_retrieval(
                     hybrid_enabled=hybrid_enabled,
                     **retrieval_overrides,
                 )
+            latency_ms = (asyncio.get_running_loop().time() - started_at) * 1000
+            quality = None
+            if body.answer_quality:
+                if case.expected_answer is None:
+                    raise RuntimeError("Missing expected answer")
+                quality = await _evaluate_answer_quality(
+                    request, settings, tenant_id, query, case.expected_answer, sources,
+                    body.temperature,
+                )
             case_completed = True
-        except (httpx.HTTPError, RuntimeError) as error:
+        except (httpx.HTTPError, RuntimeError, PyMongoError) as error:
             raise HTTPException(
                 status_code=502,
-                detail=f"Retrieval evaluation failed: {type(error).__name__}",
+                detail=f"Evaluation failed: {type(error).__name__}",
             ) from error
         finally:
             diagnostics["case_timings"].append({
@@ -1808,7 +1907,6 @@ async def evaluate_retrieval(
                     if diagnostics.get("stage_counts", {}).get(key, 0) > previous_stage_counts.get(key, 0)
                 },
             })
-        latency_ms = (asyncio.get_running_loop().time() - started_at) * 1000
         diagnostics["cases_completed"] += 1
         latency_sum += latency_ms
         ranked_ids = [str(source["document_id"]) for source in sources]
@@ -1817,25 +1915,27 @@ async def evaluate_retrieval(
         reciprocal_rank = 1 / relevant_ranks[0] if relevant_ranks else 0.0
         cases_with_hits += bool(relevant_ranks)
         reciprocal_rank_sum += reciprocal_rank
-        cases.append(
-            {
-                "query": case.query,
-                "expected_document_ids": sorted(expected),
-                "retrieved_document_ids": ranked_ids,
-                "hit": bool(relevant_ranks),
-                "reciprocal_rank": reciprocal_rank,
-                "latency_ms": round(latency_ms, 2),
-                "sources": [
-                    {
-                        "document_id": source["document_id"],
-                        "chunk_index": source["chunk_index"],
-                        "score": source["score"],
-                        "metadata": source.get("metadata", {}),
-                    }
-                    for source in sources
-                ],
-            }
-        )
+        case_result: dict[str, Any] = {
+            "query": case.query,
+            "expected_document_ids": sorted(expected),
+            "retrieved_document_ids": ranked_ids,
+            "hit": bool(relevant_ranks),
+            "reciprocal_rank": reciprocal_rank,
+            "latency_ms": round(latency_ms, 2),
+            "sources": [
+                {
+                    "document_id": source["document_id"],
+                    "chunk_index": source["chunk_index"],
+                    "score": source["score"],
+                    "metadata": source.get("metadata", {}),
+                }
+                for source in sources
+            ],
+        }
+        if quality is not None:
+            case_result["expected_answer"] = case.expected_answer
+            case_result["answer_quality"] = quality
+        cases.append(case_result)
 
     case_count = len(cases)
     result = {
@@ -1866,6 +1966,27 @@ async def evaluate_retrieval(
         },
         "cases": cases,
     }
+    if body.answer_quality:
+        result["answer_quality"] = True
+        result["answer_model"] = settings.ollama_model
+        result["judge_model"] = settings.ollama_model
+        for field in (
+            "answer_correctness", "faithfulness", "citation_support", "citation_coverage",
+        ):
+            values = [
+                case["answer_quality"][field]
+                for case in cases if case["answer_quality"][field] is not None
+            ]
+            result["metrics"][f"mean_{field}"] = sum(values) / len(values) if values else None
+            result["metrics"][f"{field}_case_count"] = len(values)
+        validities = [
+            case["answer_quality"]["citations"]["validity"]
+            for case in cases if case["answer_quality"]["citations"]["validity"] is not None
+        ]
+        result["metrics"]["mean_citation_validity"] = (
+            sum(validities) / len(validities) if validities else None
+        )
+        result["metrics"]["citation_validity_case_count"] = len(validities)
     operations: OperationsStore = request.app.state.operations
     run_id = await run_in_threadpool(operations.save_evaluation, result)
     saved = await run_in_threadpool(operations.get_evaluation, run_id, allowed_tenants)
@@ -1930,10 +2051,39 @@ async def compare_retrieval_evaluations(
     if current["dataset_id"] != baseline["dataset_id"]:
         raise HTTPException(
             status_code=400,
-            detail="Evaluation runs must use the same queries and expected document IDs",
+            detail="Evaluation runs must use the same cases and reference answers",
         )
+    if current.get("answer_quality") != baseline.get("answer_quality"):
+        raise HTTPException(status_code=400, detail="Evaluation runs must use the same evaluation mode")
+    if current.get("answer_quality") and current.get("judge_model") != baseline.get("judge_model"):
+        raise HTTPException(status_code=400, detail="Evaluation runs must use the same judge model")
     current_metrics = current["metrics"]
     baseline_metrics = baseline["metrics"]
+    metric_names = [
+        "hit_rate_at_k", "recall_at_k", "mean_reciprocal_rank", "mean_latency_ms",
+    ]
+    if current.get("answer_quality"):
+        metric_names.extend([
+            "mean_answer_correctness", "mean_faithfulness", "mean_citation_support",
+            "mean_citation_coverage", "mean_citation_validity",
+        ])
+    comparison_metrics = {
+        key: {
+            "current": current_metrics[key],
+            "baseline": baseline_metrics[key],
+            "delta": (
+                round(current_metrics[key] - baseline_metrics[key], 6)
+                if current_metrics[key] is not None and baseline_metrics[key] is not None
+                else None
+            ),
+        }
+        for key in metric_names
+    }
+    if current.get("answer_quality"):
+        for key in metric_names[4:]:
+            count_key = f"{key.removeprefix('mean_')}_case_count"
+            comparison_metrics[key]["current_case_count"] = current_metrics[count_key]
+            comparison_metrics[key]["baseline_case_count"] = baseline_metrics[count_key]
     return {
         "run_id": run_id,
         "baseline_id": baseline_id,
@@ -1944,19 +2094,7 @@ async def compare_retrieval_evaluations(
         "baseline_run_name": baseline["run_name"],
         "baseline_rerank_enabled": baseline["rerank_enabled"],
         "baseline_hybrid_enabled": baseline["hybrid_enabled"],
-        "metrics": {
-            key: {
-                "current": current_metrics[key],
-                "baseline": baseline_metrics[key],
-                "delta": round(current_metrics[key] - baseline_metrics[key], 6),
-            }
-            for key in (
-                "hit_rate_at_k",
-                "recall_at_k",
-                "mean_reciprocal_rank",
-                "mean_latency_ms",
-            )
-        },
+        "metrics": comparison_metrics,
     }
 
 

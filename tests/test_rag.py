@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from starlette.responses import JSONResponse, StreamingResponse
 
 from rag_gateway import main
+from rag_gateway.answer_evaluation import citation_statistics
 from rag_gateway.chunking import chunk_text
 from rag_gateway.config import Settings, get_settings
 from rag_gateway.main import (
@@ -65,6 +66,104 @@ def test_chunk_text_rejects_invalid_overlap() -> None:
 
 def test_chunk_text_empty_input_returns_no_chunks() -> None:
     assert chunk_text("  \n", chunk_size=10, overlap=2) == []
+
+
+def test_chunk_text_preserves_heading_hierarchy_across_sections() -> None:
+    text = (
+        "# Handbook\n## Leave\n" + "vacation " * 25
+        + "\n### Approval\n" + "manager " * 20
+        + "\n## Expenses\n" + "receipts " * 20
+    )
+    chunks = chunk_text(text, chunk_size=80, overlap=12)
+
+    assert all(0 < len(chunk) <= 80 for chunk in chunks)
+    assert all("# Handbook ## Leave" in chunk for chunk in chunks if "vacation" in chunk)
+    assert all(
+        "# Handbook ## Leave ### Approval" in chunk for chunk in chunks if "manager" in chunk
+    )
+    assert all(
+        "# Handbook ## Expenses" in chunk and "## Leave" not in chunk
+        for chunk in chunks if "receipts" in chunk
+    )
+    assert sum("vacation" in chunk for chunk in chunks) > 1
+
+
+def test_chunk_text_handles_setext_and_fenced_code_headings() -> None:
+    text = "Guide\n=====\n\n```md\n# not a heading\n```\n\nDetails\n-------\nBody"
+    chunks = chunk_text(text, chunk_size=80, overlap=5)
+
+    assert any("# Guide" in chunk and "# not a heading" in chunk for chunk in chunks)
+    assert any("# Guide ## Details" in chunk and "Body" in chunk for chunk in chunks)
+    assert not any(chunk.startswith("# not a heading") for chunk in chunks)
+
+
+def test_chunk_text_keeps_oversized_headings_and_body_within_limit() -> None:
+    chunks = chunk_text("# " + "X" * 100 + "\nbody words", chunk_size=20, overlap=19)
+
+    assert all(0 < len(chunk) <= 20 for chunk in chunks)
+    assert "X" * 20 in chunks
+    assert any("body" in chunk for chunk in chunks)
+
+
+def test_chunk_text_with_small_section_budget_has_no_empty_chunks() -> None:
+    assert chunk_text("# X\na b c", chunk_size=5, overlap=4) == [
+        "# X a", "# X b", "# X c",
+    ]
+
+
+def test_chunk_text_bounds_work_for_long_headings() -> None:
+    heading = "H" * 170
+    chunks = chunk_text(f"# {heading}\n" + "word " * 500, chunk_size=200, overlap=150)
+
+    assert any(heading in chunk for chunk in chunks)
+    assert any("word" in chunk for chunk in chunks)
+    assert len(chunks) < 70
+    assert all(len(chunk) <= 200 for chunk in chunks)
+
+
+def test_ingest_embeds_and_stores_section_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None, gateway_api_key="test-key", chunk_size=200, chunk_overlap=20)
+    embedded: list[list[str]] = []
+    stored: list[list[str]] = []
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "document"
+            embedded.append(texts)
+            return [[0.1] for _ in texts]
+
+    class FakeStore:
+        def replace_document(
+            self, tenant_id: str, document_id: str, chunks: list[str],
+            embeddings: list[list[float]], metadata: dict[str, Any],
+        ) -> int:
+            assert (tenant_id, document_id) == ("default", "guide.md")
+            assert len(embeddings) == len(chunks)
+            stored.append(chunks)
+            return len(chunks)
+
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: FakeEmbedder())
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/ingest",
+                headers={"Authorization": "Bearer test-key"},
+                json={
+                    "document_id": "guide.md",
+                    "text": "# Manual\n## Storage\n" + "backup " * 100,
+                },
+            )
+        assert response.status_code == 200
+        assert len(embedded[0]) > 1
+        assert embedded == stored
+        assert all("# Manual ## Storage" in chunk for chunk in embedded[0])
+        assert response.json()["chunks_upserted"] == len(stored[0])
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_embedder, None)
 
 
 def test_extract_user_query_supports_text_content_parts() -> None:
@@ -631,6 +730,7 @@ def test_chunk_management_store_queries_and_deletes_are_tenant_scoped() -> None:
 def test_loader_fingerprint_and_folder_deletion_are_scoped() -> None:
     class Collection:
         deleted_filter: dict[str, Any] | None = None
+        policy = "heading-v2:200:20"
 
         def find_one(self, query: dict, projection: dict) -> dict[str, Any]:
             assert query == {
@@ -643,7 +743,7 @@ def test_loader_fingerprint_and_folder_deletion_are_scoped() -> None:
                 "source_file_sha256": "abc123",
                 "embedding_model": "voyage-test",
                 "embedding_dim": 2,
-                "chunk_policy": "char-v1:200:20",
+                "chunk_policy": self.policy,
                 "metadata": {"parser_model": "parse:latest"},
             }
 
@@ -675,6 +775,10 @@ def test_loader_fingerprint_and_folder_deletion_are_scoped() -> None:
     )
     assert not store.document_is_current(
         "tenant-a", "Policies/current.md", "changed-hash", "parse:latest"
+    )
+    store.collection.policy = "char-v1:200:20"
+    assert not store.document_is_current(
+        "tenant-a", "Policies/current.md", "abc123", "parse:latest"
     )
     deleted = store.delete_missing_folder_documents(
         "tenant-a", "Policies", ["Policies/current.md"]
@@ -1142,6 +1246,220 @@ def test_retrieval_evaluation_accepts_shared_gateway_api_key(
         app.dependency_overrides.pop(get_settings, None)
         app.dependency_overrides.pop(get_store, None)
         app.dependency_overrides.pop(get_embedder, None)
+
+
+def test_answer_quality_evaluation_generates_judges_and_compares(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None, gateway_api_key="test-key", operations_db_path=str(tmp_path / "ops.sqlite3"),
+        ollama_model="judge-test", temperature=0.4,
+    )
+    payloads: list[dict[str, Any]] = []
+    invalid_judgment = False
+    no_citations = False
+    fail_generation = False
+
+    class FakeStore:
+        def search(self, _tenant: str, vector: list[float], _limit: int, **_kwargs: Any) -> list[dict[str, Any]]:
+            if vector == [2.0]:
+                return []
+            return [{
+                "document_id": "doc-a", "chunk_index": 0, "score": 0.9,
+                "metadata": {}, "text": "Records are kept for 90 days.",
+            }]
+
+    class FakeEmbedder:
+        async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+            assert input_type == "query"
+            return [[2.0] if texts[0] == "No evidence?" else [1.0]]
+
+    class FakeParser:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        def list_models(self) -> list[str]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    async def fake_post(url: str, *, json: dict[str, Any], headers: dict[str, str]) -> httpx.Response:
+        import json as json_module
+
+        payloads.append(json)
+        if fail_generation and "response_format" not in json:
+            return httpx.Response(503, request=httpx.Request("POST", url))
+        if "response_format" in json:
+            judge_data = json_module.loads(json["messages"][1]["content"])
+            assert judge_data["reference_answer"]
+            if invalid_judgment:
+                content = '{"answer_correctness": 2}'
+            elif judge_data["sources"]:
+                assert judge_data["sources"] == [
+                    {"citation": "[S1]", "text": "Records are kept for 90 days."}
+                ]
+                content = json_module.dumps({
+                    "answer_correctness": 0.8, "faithfulness": 1.0,
+                    "citation_support": None if no_citations else 0.75,
+                    "citation_coverage": 0.5, "explanation": "Citation assessment.",
+                })
+            else:
+                content = json_module.dumps({
+                    "answer_correctness": 0.4, "faithfulness": 1.0, "citation_support": None,
+                    "citation_coverage": None, "explanation": "Appropriate abstention.",
+                })
+        else:
+            content = (
+                "I cannot answer from the evidence."
+                if json["messages"][0]["content"] == "No evidence?" or no_citations
+                else "90 days [S1] [S9] [S1]."
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}],
+                       "usage": {"prompt_tokens": 10, "completion_tokens": 4}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "OllamaDocumentParser", FakeParser)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
+    monkeypatch.setitem(app.dependency_overrides, get_store, lambda: FakeStore())
+    monkeypatch.setitem(app.dependency_overrides, get_embedder, lambda: FakeEmbedder())
+    cases = [
+        {"query": "Retention?", "expected_document_ids": ["doc-a"], "expected_answer": "90 days"},
+        {"query": "No evidence?", "expected_document_ids": ["doc-b"], "expected_answer": "Unknown"},
+    ]
+    headers = {"Authorization": "Bearer test-key"}
+    try:
+        with TestClient(app) as client:
+            monkeypatch.setattr(app.state.http, "post", fake_post)
+            missing = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": [{"query": "Q", "expected_document_ids": ["d"]}]},
+            )
+            assert missing.status_code == 422
+            assert not payloads
+            response = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": cases},
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            first = result["cases"][0]["answer_quality"]
+            second = result["cases"][1]["answer_quality"]
+            assert first["answer"] == "90 days [S1] [S9] [S1]."
+            assert first["citations"] == {
+                "valid": ["[S1]", "[S1]"], "invalid": ["[S9]"], "validity": 2 / 3,
+            }
+            assert second["citations"] == {"valid": [], "invalid": [], "validity": None}
+            assert second["citation_support"] is None
+            assert result["metrics"]["mean_answer_correctness"] == pytest.approx(0.6)
+            assert result["metrics"]["mean_faithfulness"] == 1
+            assert result["metrics"]["mean_citation_support"] == 0.75
+            assert result["metrics"]["citation_support_case_count"] == 1
+            assert result["metrics"]["mean_citation_validity"] == pytest.approx(2 / 3)
+            assert result["metrics"]["citation_validity_case_count"] == 1
+            assert len(payloads) == 4
+            assert payloads[0]["temperature"] == 0.4
+            assert payloads[1]["temperature"] == 0
+            assert payloads[1]["response_format"] == {"type": "json_object"}
+            assert "Records are kept for 90 days." in payloads[0]["messages"][-1]["content"]
+            restored = client.get(
+                f"/v1/evaluations/retrieval/{result['run_id']}", headers=headers,
+            )
+            assert restored.json()["cases"] == result["cases"]
+            runs = client.get("/v1/evaluations/retrieval?tenant_id=default", headers=headers)
+            assert runs.json()["runs"][0]["metrics"]["mean_citation_validity"] == pytest.approx(2 / 3)
+            another = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": cases},
+            ).json()
+            comparison = client.get(
+                f"/v1/evaluations/retrieval/{another['run_id']}/compare/{result['run_id']}",
+                headers=headers,
+            )
+            assert comparison.status_code == 200
+            assert comparison.json()["metrics"]["mean_answer_correctness"]["delta"] == 0
+            changed = [{**cases[0], "expected_answer": "30 days"}, cases[1]]
+            changed_run = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": changed},
+            ).json()
+            mismatch = client.get(
+                f"/v1/evaluations/retrieval/{changed_run['run_id']}/compare/{result['run_id']}",
+                headers=headers,
+            )
+            assert mismatch.status_code == 400
+            no_citations = True
+            uncited = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": cases},
+            ).json()
+            assert uncited["cases"][0]["answer_quality"]["citation_coverage"] == 0
+            assert uncited["metrics"]["mean_citation_validity"] is None
+            no_citation_comparison = client.get(
+                f"/v1/evaluations/retrieval/{uncited['run_id']}/compare/{result['run_id']}",
+                headers=headers,
+            ).json()["metrics"]["mean_citation_validity"]
+            assert no_citation_comparison["delta"] is None
+            assert no_citation_comparison["current_case_count"] == 0
+            assert no_citation_comparison["baseline_case_count"] == 1
+            no_citations = False
+            invalid_judgment = True
+            failure = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": cases},
+            )
+            assert failure.status_code == 502
+            assert "invalid evaluation judgment" in failure.json()["detail"]
+            invalid_judgment = False
+            fail_generation = True
+            upstream_failure = client.post(
+                "/v1/evaluations/retrieval", headers=headers,
+                json={"answer_quality": True, "cases": cases},
+            )
+            assert upstream_failure.status_code == 502
+            runs_after_failure = client.get("/v1/evaluations/retrieval?tenant_id=default", headers=headers)
+            assert len(runs_after_failure.json()["runs"]) == 4
+            usage = {
+                row["operation"]: row for row in app.state.operations.model_usage_summary("default")
+            }
+            assert usage["generation"]["failed_calls"] == 1
+            assert usage["evaluation_judge"]["calls"] == 9
+            assert usage["evaluation_judge"]["failed_calls"] == 1
+            other_judge_id = app.state.operations.save_evaluation(
+                {**result, "judge_model": "different-judge"}
+            )
+            judge_mismatch = client.get(
+                f"/v1/evaluations/retrieval/{other_judge_id}/compare/{result['run_id']}",
+                headers=headers,
+            )
+            assert judge_mismatch.status_code == 400
+            assert "same judge model" in judge_mismatch.json()["detail"]
+            calls_before_retrieval = len(payloads)
+            retrieval_only = client.post(
+                "/v1/evaluations/retrieval", headers=headers, json={"cases": cases},
+            ).json()
+            assert len(payloads) == calls_before_retrieval
+            incompatible = client.get(
+                f"/v1/evaluations/retrieval/{retrieval_only['run_id']}/compare/{result['run_id']}",
+                headers=headers,
+            )
+            assert incompatible.status_code == 400
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_embedder, None)
+
+
+def test_citation_statistics_distinguishes_absent_and_invalid_citations() -> None:
+    assert citation_statistics("No citations", 1) == {
+        "valid": [], "invalid": [], "validity": None,
+    }
+    assert citation_statistics("Bad [S0] and [S02]", 1) == {
+        "valid": [], "invalid": ["[S0]", "[S02]"], "validity": 0.0,
+    }
 
 
 def test_evaluation_ui_sends_entered_token_as_bearer_credential() -> None:

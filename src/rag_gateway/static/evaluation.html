@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <title>Retrieval evaluation</title>
+  <title>Retrieval and answer evaluation</title>
   <style>
     :root {
       color-scheme: light;
@@ -64,13 +64,13 @@
 </head>
 <body>
   <header>
-    <h1>Retrieval evaluation</h1>
-    <p>Measure whether known relevant documents appear in the gateway's retrieved results.</p>
+    <h1>Retrieval evaluation and answer quality</h1>
+    <p>Evaluate retrieved documents and, optionally, generated answers and citations.</p>
   </header>
   <main>
     <section aria-labelledby="setup-title">
       <h2 id="setup-title">Evaluation set</h2>
-      <p class="note">Enter questions and the exact document IDs expected to answer each one. Hit rate counts cases with any expected document in the top K; recall measures expected document coverage; reciprocal rank rewards an expected document appearing earlier. Latency includes embedding and Atlas search. The workbench evaluates retrieval only; it does not call the chat model or judge answer correctness.</p>
+      <p class="note">Enter questions and exact expected document IDs. Retrieval metrics measure hits, recall, rank, and embedding/search latency. Optional answer evaluation generates an answer and uses the configured local Ollama model as a judge. Judge scores are estimates, not ground truth.</p>
       <div class="two">
         <div class="field">
           <label for="tenant">Tenant ID</label>
@@ -97,7 +97,7 @@
         </div>
       </div>
       <div class="field">
-        <label for="temperature">Temperature (not used by retrieval)</label>
+        <label for="temperature">Answer generation temperature (not used by retrieval)</label>
         <input id="temperature" type="number" min="0" max="2" step="0.01" placeholder="Use configured default">
       </div>
       <label class="checkbox-field" for="rerank-enabled">
@@ -108,10 +108,14 @@
         <input id="hybrid-enabled" type="checkbox">
         Enable hybrid vector + text search
       </label>
+      <label class="checkbox-field" for="answer-quality">
+        <input id="answer-quality" type="checkbox">
+        Evaluate answer correctness, faithfulness, and citation quality
+      </label>
       <div class="field">
         <label for="cases">Cases (JSON array)</label>
         <textarea id="cases" spellcheck="false" aria-describedby="cases-note"></textarea>
-        <span id="cases-note" class="note">Each case needs a <code>query</code> and one or more exact <code>expected_document_ids</code>. Maximum 100 cases per run.</span>
+        <span id="cases-note" class="note">Each case needs a <code>query</code> and exact <code>expected_document_ids</code>. Answer evaluation also requires an <code>expected_answer</code> for every case and makes two Ollama calls per case. The reference answer, generated answer and scores are saved. Maximum 100 cases per run.</span>
       </div>
       <div class="buttons">
         <button type="button" class="secondary" id="load-example">Load example cases</button>
@@ -153,7 +157,7 @@
       <h2 id="cases-title">Case details</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Query</th><th>Expected documents</th><th>Retrieved documents and scores</th><th>Hit</th><th>Latency</th></tr></thead>
+          <thead><tr><th>Query</th><th>Expected documents</th><th>Retrieved documents and scores</th><th>Hit</th><th>Retrieval latency</th><th>Answer quality</th></tr></thead>
           <tbody id="results"></tbody>
         </table>
       </div>
@@ -162,9 +166,8 @@
   </main>
   <script>
     const exampleCases = [
-      { query: "How long are audit events retained?", expected_document_ids: ["sample-docs/retention-policy.md"] },
-      { query: "What crops grow in the south bed?", expected_document_ids: ["sample-docs/watering-notes.docx", "sample-docs/greenhouse-harvest.xlsx"] },
-      { query: "When is support available?", expected_document_ids: ["sample-docs/service-handbook.md"] }
+      { query: "How long are audit events retained?", expected_document_ids: ["sample-docs/retention-policy.md"], expected_answer: "Service audit events are retained for 90 days." },
+      { query: "When is support available?", expected_document_ids: ["sample-docs/service-handbook.md"], expected_answer: "Support is available weekdays from 09:00 to 17:00 UTC." }
     ];
     const casesInput = document.querySelector("#cases");
     const message = document.querySelector("#message");
@@ -193,10 +196,14 @@
       return element;
     }
 
+    function score(value) {
+      return typeof value === "number" ? value.toFixed(2) : "N/A";
+    }
+
     function renderResults(data) {
       const values = data.metrics;
       document.querySelector("#run-settings").textContent =
-        `Candidates: ${data.retrieval_num_candidates ?? "Unknown"} | Minimum vector score: ${data.retrieval_min_score ?? "Unknown"} | Temperature: ${data.temperature ?? "Unknown"} (not used by retrieval)`;
+        `Candidates: ${data.retrieval_num_candidates ?? "Unknown"} | Minimum vector score: ${data.retrieval_min_score ?? "Unknown"} | Temperature: ${data.temperature ?? "Unknown"} | Answer evaluation: ${data.answer_quality ? `On (judge: ${data.judge_model})` : "Off"}`;
       metrics.replaceChildren(
         metricCard("Cases", String(values.case_count)),
         metricCard("Reranking", optionLabel(data.rerank_enabled)),
@@ -206,6 +213,15 @@
         metricCard("Mean reciprocal rank", values.mean_reciprocal_rank.toFixed(3)),
         metricCard("Mean latency", `${values.mean_latency_ms.toFixed(0)} ms`)
       );
+      if (data.answer_quality) {
+        for (const [label, key] of [
+          ["Answer correctness", "answer_correctness"], ["Faithfulness", "faithfulness"],
+          ["Citation support", "citation_support"], ["Citation coverage", "citation_coverage"],
+          ["Citation validity", "citation_validity"]
+        ]) {
+          metrics.append(metricCard(`${label} (cases: ${values[`${key}_case_count`]})`, score(values[`mean_${key}`])));
+        }
+      }
       resultsBody.replaceChildren();
       for (const result of data.cases) {
         const row = document.createElement("tr");
@@ -222,6 +238,17 @@
         const hit = cell(result.hit ? "Yes" : "No");
         hit.className = result.hit ? "hit" : "miss";
         row.append(hit, cell(`${result.latency_ms.toFixed(0)} ms`));
+        const quality = result.answer_quality;
+        const details = cell(quality ? [
+          `Reference: ${result.expected_answer}`,
+          `Answer: ${quality.answer}`,
+          `Correctness: ${score(quality.answer_correctness)} · Faithfulness: ${score(quality.faithfulness)}`,
+          `Citation support: ${score(quality.citation_support)} · Coverage: ${score(quality.citation_coverage)} · Validity: ${score(quality.citations.validity)}`,
+          `Valid citations: ${quality.citations.valid.join(", ") || "None"} · Invalid: ${quality.citations.invalid.join(", ") || "None"}`,
+          `Judge: ${quality.explanation}`
+        ].join("\n") : "Not evaluated");
+        details.style.whiteSpace = "pre-line";
+        row.append(details);
         resultsBody.append(row);
       }
     }
@@ -347,9 +374,11 @@
         );
         const title = document.createElement("strong");
         title.textContent = `${result.run_name} vs baseline ${result.baseline_run_name}: `;
-        const summary = Object.entries(result.metrics).map(([name, values]) =>
-          `${name.replaceAll("_", " ")} ${values.delta >= 0 ? "+" : ""}${values.delta.toFixed(3)}`
-        ).join(" · ");
+        const summary = Object.entries(result.metrics).map(([name, values]) => {
+          const delta = values.delta === null ? "N/A" : `${values.delta >= 0 ? "+" : ""}${values.delta.toFixed(3)}`;
+          const counts = values.current_case_count === undefined ? "" : ` (cases ${values.current_case_count}/${values.baseline_case_count})`;
+          return `${name.replaceAll("_", " ")} ${delta}${counts}`;
+        }).join(" · ");
         comparison.replaceChildren(title, document.createTextNode(summary));
       } catch (error) {
         comparison.textContent = error.message;
@@ -384,6 +413,7 @@
             top_k: Number(document.querySelector("#top-k").value),
             rerank_enabled: document.querySelector("#rerank-enabled").checked,
             hybrid_enabled: document.querySelector("#hybrid-enabled").checked,
+            answer_quality: document.querySelector("#answer-quality").checked,
             cases
           })
         });
@@ -394,7 +424,7 @@
         }
         renderResults(data);
         message.style.color = "#176f5b";
-        message.textContent = `Saved ${data.run_name}. Metrics use exact document ID matches.`;
+        message.textContent = `Saved ${data.run_name}. Retrieval metrics use exact document ID matches${data.answer_quality ? "; answer scores are model judgments" : ""}.`;
         try {
           await refreshSavedRuns();
         } catch (error) {

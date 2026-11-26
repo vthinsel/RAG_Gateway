@@ -213,6 +213,7 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
         document_loader_enabled=True,
     )
     ingested_documents: list[tuple[str, str, str, str | None]] = []
+    embedded_batches: list[list[str]] = []
 
     class FakeStore:
         def replace_document(
@@ -232,6 +233,7 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
     class FakeEmbedder:
         async def embed(self, texts: list[str], input_type: str) -> list[list[float]]:
             assert input_type == "document"
+            embedded_batches.append(texts)
             return [[0.1, 0.2] for _ in texts]
 
     class FakeParser:
@@ -266,7 +268,11 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
                     "tenant_id": "default",
                 },
                 files=[
-                    ("files", ("architecture.md", b"VM inventory", "text/markdown")),
+                    (
+                        "files",
+                        ("architecture.md", b"# Architecture\n## Inventory\n" + b"server " * 400,
+                         "text/markdown"),
+                    ),
                     ("files", ("diagram.mmd", b"flowchart TD\n  A --> B", "text/plain")),
                     ("files", ("ignored.exe", b"binary", "application/octet-stream")),
                 ],
@@ -321,6 +327,13 @@ def test_document_loader_accepts_browser_uploads_and_ingests_relative_paths(
             "diagram.mmd",
         }
         assert all(tenant_id == "default" for tenant_id, _, _, _ in ingested_documents)
+        architecture = next(batch for batch in embedded_batches if any("server" in c for c in batch))
+        assert len(architecture) > 1
+        assert all("# Architecture ## Inventory" in chunk for chunk in architecture)
+        assert any(
+            document_id == "lab/architecture.md" and text == "\n".join(architecture)
+            for _, document_id, text, _ in ingested_documents
+        )
     finally:
         main.app.dependency_overrides.pop(get_settings, None)
         main.app.dependency_overrides.pop(main.get_store, None)
@@ -899,6 +912,56 @@ def test_extracts_supported_text_formats_without_ollama(tmp_path: Path) -> None:
         assert parser.extract(mermaid) == "flowchart TD\n  A --> B"
         assert parser.extract(html) == "Visible\ntext"
         assert parser.extract(csv_file) == "name | value\nAlpha | 42"
+    finally:
+        parser.close()
+
+
+def test_extracts_html_title_and_nested_headings(tmp_path: Path) -> None:
+    path = tmp_path / "guide.html"
+    path.write_text(
+        "<title>Manual</title><h1>Getting <em>started</em></h1>"
+        "<p>Introduction</p><h2>De<strong>tails</strong></h2><p>More</p>",
+        encoding="utf-8",
+    )
+    parser = OllamaDocumentParser("http://ollama.test", "glm-ocr:latest")
+    try:
+        assert parser.extract(path) == (
+            "# Manual\n## Getting started\nIntroduction\n### Details\nMore"
+        )
+    finally:
+        parser.close()
+
+
+def test_extracts_docx_title_and_headings(tmp_path: Path) -> None:
+    docx = pytest.importorskip("docx")
+    document = docx.Document()
+    document.add_paragraph("Manual", style="Title")
+    document.add_heading("Getting started", level=1)
+    document.add_paragraph("Introduction")
+    document.add_heading("Details", level=2)
+    document.add_paragraph("More")
+    path = tmp_path / "guide.docx"
+    document.save(path)
+    parser = OllamaDocumentParser("http://ollama.test", "glm-ocr:latest")
+    try:
+        assert parser.extract(path) == (
+            "# Manual\n\n## Getting started\n\nIntroduction\n\n### Details\n\nMore"
+        )
+    finally:
+        parser.close()
+
+
+def test_extracts_presentation_slide_title_as_heading(tmp_path: Path) -> None:
+    pptx = pytest.importorskip("pptx")
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Harvest"
+    slide.placeholders[1].text = "Tomatoes"
+    path = tmp_path / "guide.pptx"
+    presentation.save(path)
+    parser = OllamaDocumentParser("http://ollama.test", "glm-ocr:latest")
+    try:
+        assert parser.extract(path) == "## Slide 1\n### Harvest\nTomatoes"
     finally:
         parser.close()
 
